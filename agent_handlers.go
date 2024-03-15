@@ -23,6 +23,12 @@ func (a *Agent) OnCandidate(f func(Candidate)) error {
 	return nil
 }
 
+// OnSuccessfulBindingResponse sets a handler that is fired when a successful binding response is received
+func (a *Agent) OnSuccessfulBindingResponse(f func(*CandidatePair)) error {
+	a.onSuccessfulBindingResponseHdlr.Store(f)
+	return nil
+}
+
 func (a *Agent) onSelectedCandidatePairChange(p *CandidatePair) {
 	if h, ok := a.onSelectedCandidatePairChangeHdlr.Load().(func(Candidate, Candidate)); ok {
 		h(p.Local, p.Remote)
@@ -38,6 +44,12 @@ func (a *Agent) onCandidate(c Candidate) {
 func (a *Agent) onConnectionStateChange(s ConnectionState) {
 	if hdlr, ok := a.onConnectionStateChangeHdlr.Load().(func(ConnectionState)); ok {
 		hdlr(s)
+	}
+}
+
+func (a *Agent) onSuccessfulBindingResponse(p *CandidatePair) {
+	if h, ok := a.onSuccessfulBindingResponseHdlr.Load().(func(*CandidatePair)); ok {
+		h(p)
 	}
 }
 
