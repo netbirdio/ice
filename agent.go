@@ -41,10 +41,10 @@ type Agent struct {
 	afterRunFn []func(ctx context.Context)
 	muAfterRun sync.Mutex
 
-	onConnectionStateChangeHdlr       atomic.Value // func(ConnectionState)
-	onSelectedCandidatePairChangeHdlr atomic.Value // func(Candidate, Candidate)
-	onCandidateHdlr                   atomic.Value // func(Candidate)
-	onSuccessfulBindingResponseHdlr   atomic.Value // func(Candidate)
+	onConnectionStateChangeHdlr                 atomic.Value // func(ConnectionState)
+	onSelectedCandidatePairChangeHdlr           atomic.Value // func(Candidate, Candidate)
+	onCandidateHdlr                             atomic.Value // func(Candidate)
+	onSuccessfulSelectedPairBindingResponseHdlr atomic.Value // func(*Candidate)
 
 	// State owned by the taskLoop
 	onConnected     chan struct{}

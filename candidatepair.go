@@ -110,12 +110,13 @@ func (p *CandidatePair) markBindingRequest(transactionID [12]byte) {
 	p.lastBindingTransactionID = transactionID
 }
 
-func (p *CandidatePair) markBindingResponse(transactionID [12]byte) {
+func (p *CandidatePair) markBindingResponse(transactionID [12]byte) bool {
 	if p.lastBindingRequest.IsZero() || transactionID != p.lastBindingTransactionID {
-		return
+		return false
 	}
 
 	p.latency = time.Since(p.lastBindingRequest)
+	return true
 }
 
 func (p *CandidatePair) Latency() time.Duration {

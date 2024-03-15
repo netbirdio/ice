@@ -139,13 +139,15 @@ func (s *controllingSelector) HandleSuccessResponse(m *stun.Message, local, remo
 		return
 	}
 
-	p.markBindingResponse(m.TransactionID)
-	s.agent.onSuccessfulBindingResponse(p)
-
 	p.state = CandidatePairStateSucceeded
 	s.log.Tracef("Found valid candidate pair: %s", p)
 	if pendingRequest.isUseCandidate && s.agent.getSelectedPair() == nil {
 		s.agent.setSelectedPair(p)
+	}
+
+	ok = p.markBindingResponse(m.TransactionID)
+	if ok && s.agent.getSelectedPair() == p {
+		s.agent.onSuccessfulSelectedPairBindingResponse(p)
 	}
 }
 
@@ -233,8 +235,10 @@ func (s *controlledSelector) HandleSuccessResponse(m *stun.Message, local, remot
 		return
 	}
 
-	p.markBindingResponse(m.TransactionID)
-	s.agent.onSuccessfulBindingResponse(p)
+	ok = p.markBindingResponse(m.TransactionID)
+	if ok {
+		s.agent.onSuccessfulSelectedPairBindingResponse(p)
+	}
 
 	p.state = CandidatePairStateSucceeded
 	s.log.Tracef("Found valid candidate pair: %s", p)
