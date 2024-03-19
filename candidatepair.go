@@ -19,6 +19,8 @@ func newCandidatePair(local, remote Candidate, controlling bool) *CandidatePair 
 	}
 }
 
+type TransactionID [stun.TransactionIDSize]byte
+
 // CandidatePair is a combination of a
 // local and remote candidate
 type CandidatePair struct {
@@ -27,7 +29,7 @@ type CandidatePair struct {
 	Local                    Candidate
 	latency                  time.Duration
 	lastBindingRequest       time.Time
-	lastBindingTransactionID [12]byte
+	lastBindingTransactionID TransactionID
 	bindingRequestCount      uint16
 	state                    CandidatePairState
 	nominated                bool
@@ -105,12 +107,12 @@ func (a *Agent) sendSTUN(msg *stun.Message, local, remote Candidate) {
 	}
 }
 
-func (p *CandidatePair) markBindingRequest(transactionID [12]byte) {
+func (p *CandidatePair) markBindingRequest(transactionID TransactionID) {
 	p.lastBindingRequest = time.Now()
 	p.lastBindingTransactionID = transactionID
 }
 
-func (p *CandidatePair) markBindingResponse(transactionID [12]byte) bool {
+func (p *CandidatePair) markBindingResponse(transactionID TransactionID) bool {
 	if p.lastBindingRequest.IsZero() || transactionID != p.lastBindingTransactionID {
 		return false
 	}
