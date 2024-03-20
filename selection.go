@@ -144,6 +144,11 @@ func (s *controllingSelector) HandleSuccessResponse(m *stun.Message, local, remo
 	if pendingRequest.isUseCandidate && s.agent.getSelectedPair() == nil {
 		s.agent.setSelectedPair(p)
 	}
+
+	ok = p.markBindingResponse(m.TransactionID)
+	if ok && s.agent.getSelectedPair() == p {
+		s.agent.onSuccessfulSelectedPairBindingResponse(p)
+	}
 }
 
 func (s *controllingSelector) PingCandidate(local, remote Candidate) {
@@ -228,6 +233,11 @@ func (s *controlledSelector) HandleSuccessResponse(m *stun.Message, local, remot
 		// This shouldn't happen
 		s.log.Error("Success response from invalid candidate pair")
 		return
+	}
+
+	ok = p.markBindingResponse(m.TransactionID)
+	if ok {
+		s.agent.onSuccessfulSelectedPairBindingResponse(p)
 	}
 
 	p.state = CandidatePairStateSucceeded

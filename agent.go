@@ -15,8 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	atomicx "github.com/pion/ice/v3/internal/atomic"
-	stunx "github.com/pion/ice/v3/internal/stun"
 	"github.com/pion/logging"
 	"github.com/pion/mdns"
 	"github.com/pion/stun/v2"
@@ -25,6 +23,9 @@ import (
 	"github.com/pion/transport/v3/stdnet"
 	"github.com/pion/transport/v3/vnet"
 	"golang.org/x/net/proxy"
+
+	atomicx "github.com/pion/ice/v3/internal/atomic"
+	stunx "github.com/pion/ice/v3/internal/stun"
 )
 
 type bindingRequest struct {
@@ -40,9 +41,10 @@ type Agent struct {
 	afterRunFn []func(ctx context.Context)
 	muAfterRun sync.Mutex
 
-	onConnectionStateChangeHdlr       atomic.Value // func(ConnectionState)
-	onSelectedCandidatePairChangeHdlr atomic.Value // func(Candidate, Candidate)
-	onCandidateHdlr                   atomic.Value // func(Candidate)
+	onConnectionStateChangeHdlr                 atomic.Value // func(ConnectionState)
+	onSelectedCandidatePairChangeHdlr           atomic.Value // func(Candidate, Candidate)
+	onCandidateHdlr                             atomic.Value // func(Candidate)
+	onSuccessfulSelectedPairBindingResponseHdlr atomic.Value // func(*Candidate)
 
 	// State owned by the taskLoop
 	onConnected     chan struct{}
@@ -648,7 +650,8 @@ func (a *Agent) checkKeepalive() {
 
 	if (a.keepaliveInterval != 0) &&
 		((time.Since(selectedPair.Local.LastSent()) > a.keepaliveInterval) ||
-			(time.Since(selectedPair.Remote.LastReceived()) > a.keepaliveInterval)) {
+			(time.Since(selectedPair.Remote.LastReceived()) > a.keepaliveInterval) ||
+			(time.Since(selectedPair.lastBindingRequest) > a.keepaliveInterval)) {
 		// We use binding request instead of indication to support refresh consent schemas
 		// see https://tools.ietf.org/html/rfc7675
 		a.selector.PingCandidate(selectedPair.Local, selectedPair.Remote)
@@ -991,6 +994,9 @@ func (a *Agent) sendBindingRequest(m *stun.Message, local, remote Candidate) {
 		isUseCandidate: m.Contains(stun.AttrUseCandidate),
 	})
 
+	p := a.findPair(local, remote)
+	p.markBindingRequest(m.TransactionID)
+
 	a.sendSTUN(m, local, remote)
 }
 
@@ -1174,7 +1180,7 @@ func (a *Agent) GetSelectedCandidatePair() (*CandidatePair, error) {
 		return nil, err
 	}
 
-	return &CandidatePair{Local: local, Remote: remote}, nil
+	return &CandidatePair{Local: local, Remote: remote, latency: selectedPair.Latency()}, nil
 }
 
 func (a *Agent) getSelectedPair() *CandidatePair {

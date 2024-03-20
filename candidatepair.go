@@ -5,6 +5,7 @@ package ice
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/pion/stun/v2"
 )
@@ -18,12 +19,17 @@ func newCandidatePair(local, remote Candidate, controlling bool) *CandidatePair 
 	}
 }
 
+type TransactionID [stun.TransactionIDSize]byte
+
 // CandidatePair is a combination of a
 // local and remote candidate
 type CandidatePair struct {
 	iceRoleControlling       bool
 	Remote                   Candidate
 	Local                    Candidate
+	latency                  time.Duration
+	lastBindingRequest       time.Time
+	lastBindingTransactionID TransactionID
 	bindingRequestCount      uint16
 	state                    CandidatePairState
 	nominated                bool
@@ -99,4 +105,22 @@ func (a *Agent) sendSTUN(msg *stun.Message, local, remote Candidate) {
 	if err != nil {
 		a.log.Tracef("Failed to send STUN message: %s", err)
 	}
+}
+
+func (p *CandidatePair) markBindingRequest(transactionID TransactionID) {
+	p.lastBindingRequest = time.Now()
+	p.lastBindingTransactionID = transactionID
+}
+
+func (p *CandidatePair) markBindingResponse(transactionID TransactionID) bool {
+	if p.lastBindingRequest.IsZero() || transactionID != p.lastBindingTransactionID {
+		return false
+	}
+
+	p.latency = time.Since(p.lastBindingRequest)
+	return true
+}
+
+func (p *CandidatePair) Latency() time.Duration {
+	return p.latency
 }
