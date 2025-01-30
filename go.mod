@@ -2,6 +2,8 @@ module github.com/netbirdio/ice/v3
 
 go 1.13
 
+replace github.com/pion/ice/v3 => ./
+
 require (
 	github.com/google/uuid v1.6.0
 	github.com/kr/pretty v0.1.0 // indirect
