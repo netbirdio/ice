@@ -5,6 +5,7 @@ package ice
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pion/stun/v2"
@@ -24,6 +25,7 @@ type TransactionID [stun.TransactionIDSize]byte
 // CandidatePair is a combination of a
 // local and remote candidate
 type CandidatePair struct {
+	mux                      sync.Mutex
 	iceRoleControlling       bool
 	Remote                   Candidate
 	Local                    Candidate
@@ -108,19 +110,24 @@ func (a *Agent) sendSTUN(msg *stun.Message, local, remote Candidate) {
 }
 
 func (p *CandidatePair) markBindingRequest(transactionID TransactionID) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
 	p.lastBindingRequest = time.Now()
 	p.lastBindingTransactionID = transactionID
 }
 
 func (p *CandidatePair) markBindingResponse(transactionID TransactionID) bool {
+	p.mux.Lock()
+	defer p.mux.Unlock()
 	if p.lastBindingRequest.IsZero() || transactionID != p.lastBindingTransactionID {
 		return false
 	}
-
 	p.latency = time.Since(p.lastBindingRequest)
 	return true
 }
 
 func (p *CandidatePair) Latency() time.Duration {
+	p.mux.Lock()
+	defer p.mux.Unlock()
 	return p.latency
 }
