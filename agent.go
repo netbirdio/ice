@@ -1128,6 +1128,14 @@ func (a *Agent) handleInbound(m *stun.Message, local Candidate, remote net.Addr)
 				RelPort:   0,
 			}
 
+			// If the remote candidate has CandidatePairID, we can use it to set the CandidateID
+			candidatePairID, ok, err := CandidatePairIDFromSTUN(m)
+			if err != nil {
+				a.log.Errorf("Failed to create candidate pair ID from STUN message (%s)", err)
+			} else if ok {
+				prflxCandidateConfig.CandidateID = candidatePairID.SourceCandidateID()
+			}
+
 			prflxCandidate, err := NewCandidatePeerReflexive(&prflxCandidateConfig)
 			if err != nil {
 				a.log.Errorf("Failed to create new remote prflx candidate (%s)", err)

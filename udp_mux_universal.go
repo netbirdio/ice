@@ -20,7 +20,7 @@ type UniversalUDPMux interface {
 	UDPMux
 	GetXORMappedAddr(stunAddr net.Addr, deadline time.Duration) (*stun.XORMappedAddress, error)
 	GetRelayedAddr(turnAddr net.Addr, deadline time.Duration) (*net.Addr, error)
-	GetConnForURL(ufrag string, url string, addr net.Addr) (net.PacketConn, error)
+	GetConnForURL(ufrag string, url string, addr net.Addr, candidatedID string) (net.PacketConn, error)
 }
 
 // UniversalUDPMuxDefault handles STUN and TURN servers packets by wrapping the original UDPConn overriding ReadFrom.
@@ -90,8 +90,8 @@ func (m *UniversalUDPMuxDefault) GetRelayedAddr(net.Addr, time.Duration) (*net.A
 
 // GetConnForURL add uniques to the muxed connection by concatenating ufrag and URL (e.g. STUN URL) to be able to support multiple STUN/TURN servers
 // and return a unique connection per server.
-func (m *UniversalUDPMuxDefault) GetConnForURL(ufrag string, url string, addr net.Addr) (net.PacketConn, error) {
-	return m.UDPMuxDefault.GetConn(fmt.Sprintf("%s%s", ufrag, url), addr)
+func (m *UniversalUDPMuxDefault) GetConnForURL(ufrag string, url string, addr net.Addr, candidateID string) (net.PacketConn, error) {
+	return m.UDPMuxDefault.GetConn(fmt.Sprintf("%s%s", ufrag, url), addr, candidateID)
 }
 
 // ReadFrom is called by UDPMux connWorker and handles packets coming from the STUN server discovering a mapped address.

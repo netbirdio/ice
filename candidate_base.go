@@ -394,7 +394,7 @@ func (c *candidateBase) Equal(other Candidate) bool {
 
 // String makes the candidateBase printable
 func (c *candidateBase) String() string {
-	return fmt.Sprintf("%s %s %s%s", c.NetworkType(), c.Type(), net.JoinHostPort(c.Address(), strconv.Itoa(c.Port())), c.relatedAddress)
+	return fmt.Sprintf("%s %s %s%s %s", c.NetworkType(), c.Type(), net.JoinHostPort(c.Address(), strconv.Itoa(c.Port())), c.relatedAddress, c.id)
 }
 
 // LastReceived returns a time.Time indicating the last time
@@ -474,6 +474,8 @@ func (c *candidateBase) Marshal() string {
 			r.Port)
 	}
 
+	val += fmt.Sprintf(" id %s", c.ID())
+
 	return val
 }
 
@@ -522,42 +524,54 @@ func UnmarshalCandidate(raw string) (Candidate, error) {
 	relatedAddress := ""
 	relatedPort := 0
 	tcpType := TCPTypeUnspecified
+	var candidateID string
+	var errParseCandidateID = errors.New("failed to parse candidate ID")
 
-	if len(split) > 8 {
-		split = split[8:]
-
-		if split[0] == "raddr" {
-			if len(split) < 4 {
-				return nil, fmt.Errorf("%w: incorrect length", errParseRelatedAddr)
+	// Parse optional attributes (starting from index 8)
+	for i := 8; i < len(split); i++ {
+		switch split[i] {
+		case "raddr":
+			if i+1 >= len(split) {
+				return nil, fmt.Errorf("%w: missing related address", errParseRelatedAddr)
 			}
-
-			// RelatedAddress
-			relatedAddress = split[1]
-
-			// RelatedPort
-			rawRelatedPort, parseErr := strconv.ParseUint(split[3], 10, 16)
-			if parseErr != nil {
-				return nil, fmt.Errorf("%w: %v", errParsePort, parseErr) //nolint:errorlint
+			relatedAddress = split[i+1]
+			i++
+		case "rport":
+			if i+1 >= len(split) {
+				return nil, fmt.Errorf("%w: missing related port", errParseRelatedAddr)
+			}
+			rawRelatedPort, err := strconv.ParseUint(split[i+1], 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", errParsePort, err)
 			}
 			relatedPort = int(rawRelatedPort)
-		} else if split[0] == "tcptype" {
-			if len(split) < 2 {
-				return nil, fmt.Errorf("%w: incorrect length", errParseTCPType)
+			i++
+		case "tcptype":
+			if i+1 >= len(split) {
+				return nil, fmt.Errorf("%w: missing TCP type", errParseTCPType)
 			}
-
-			tcpType = NewTCPType(split[1])
+			tcpType = NewTCPType(split[i+1])
+			i++
+		case "id":
+			if i+1 >= len(split) {
+				return nil, fmt.Errorf("%w: missing candidate ID", errParseCandidateID)
+			}
+			candidateID = split[i+1]
+			i++
+		default:
+			// Unknown key, could be extended attributes, ignore for now
 		}
 	}
 
 	switch typ {
 	case "host":
-		return NewCandidateHost(&CandidateHostConfig{"", protocol, address, port, component, priority, foundation, tcpType})
+		return NewCandidateHost(&CandidateHostConfig{candidateID, protocol, address, port, component, priority, foundation, tcpType})
 	case "srflx":
-		return NewCandidateServerReflexive(&CandidateServerReflexiveConfig{"", protocol, address, port, component, priority, foundation, relatedAddress, relatedPort})
+		return NewCandidateServerReflexive(&CandidateServerReflexiveConfig{candidateID, protocol, address, port, component, priority, foundation, relatedAddress, relatedPort})
 	case "prflx":
-		return NewCandidatePeerReflexive(&CandidatePeerReflexiveConfig{"", protocol, address, port, component, priority, foundation, relatedAddress, relatedPort})
+		return NewCandidatePeerReflexive(&CandidatePeerReflexiveConfig{candidateID, protocol, address, port, component, priority, foundation, relatedAddress, relatedPort})
 	case "relay":
-		return NewCandidateRelay(&CandidateRelayConfig{"", protocol, address, port, component, priority, foundation, relatedAddress, relatedPort, "", nil})
+		return NewCandidateRelay(&CandidateRelayConfig{candidateID, protocol, address, port, component, priority, foundation, relatedAddress, relatedPort, "", nil})
 	default:
 	}
 

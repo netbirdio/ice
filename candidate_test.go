@@ -264,6 +264,41 @@ func TestCandidateFoundation(t *testing.T) {
 		}).Foundation())
 }
 
+func TestCandidateMarshal1(t *testing.T) {
+	for _, test := range []struct {
+		candidate   Candidate
+		marshaled   string
+		expectError bool
+	}{
+		{
+			&CandidateServerReflexive{
+				candidateBase{
+					networkType:    NetworkTypeUDP4,
+					candidateType:  CandidateTypeServerReflexive,
+					address:        "191.228.238.68",
+					port:           53991,
+					relatedAddress: &CandidateRelatedAddress{"192.168.0.274", 53991},
+					id:             "candidate:abcd",
+				},
+			},
+			"647372371 1 udp 1694498815 191.228.238.68 53991 typ srflx raddr 192.168.0.274 rport 53991 id candidate:abcd",
+			false,
+		},
+	} {
+		actualCandidate, err := UnmarshalCandidate(test.marshaled)
+		if test.expectError {
+			t.Fatalf("%s", err)
+			assert.Error(t, err)
+			continue
+		}
+
+		assert.NoError(t, err)
+
+		assert.True(t, test.candidate.Equal(actualCandidate))
+		assert.Equal(t, test.marshaled, actualCandidate.Marshal())
+	}
+}
+
 func TestCandidateMarshal(t *testing.T) {
 	for _, test := range []struct {
 		candidate   Candidate
@@ -306,6 +341,20 @@ func TestCandidateMarshal(t *testing.T) {
 					address:        "191.228.238.68",
 					port:           53991,
 					relatedAddress: &CandidateRelatedAddress{"192.168.0.274", 53991},
+				},
+			},
+			"647372371 1 udp 1694498815 191.228.238.68 53991 typ srflx raddr 192.168.0.274 rport 53991",
+			false,
+		},
+		{
+			&CandidateServerReflexive{
+				candidateBase{
+					networkType:    NetworkTypeUDP4,
+					candidateType:  CandidateTypeServerReflexive,
+					address:        "191.228.238.68",
+					port:           53991,
+					relatedAddress: &CandidateRelatedAddress{"192.168.0.274", 53991},
+					id:             "abcd",
 				},
 			},
 			"647372371 1 udp 1694498815 191.228.238.68 53991 typ srflx raddr 192.168.0.274 rport 53991",
