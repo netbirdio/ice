@@ -8,24 +8,22 @@ package ice
 
 import (
 	"crypto/rand"
-	"crypto/sha1" //nolint:gosec
+	"crypto/sha256"
 	"encoding/binary"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
 	"github.com/stretchr/testify/require"
 )
 
-func TestUDPMux(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestUDPMux(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	conn4, err := net.ListenUDP(udp, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	require.NoError(t, err)
@@ -52,13 +50,31 @@ func TestUDPMux(t *testing.T) {
 		network string
 	}
 
-	for _, subTest := range []testCase{
+	testCases := []testCase{
 		{name: "IPv4loopback", conn: conn4, network: udp4},
 		{name: "IPv6loopback", conn: conn6, network: udp6},
 		{name: "Unspecified", conn: connUnspecified, network: udp},
 		{name: "IPv4Unspecified", conn: conn4Unspecified, network: udp4},
 		{name: "IPv6Unspecified", conn: conn6Unspecified, network: udp6},
-	} {
+	}
+
+	if ipv6Available(t) {
+		addr6 := getLocalIPAddress(t, NetworkTypeUDP6)
+
+		conn6Unspecified, listenEerr := net.ListenUDP(udp, &net.UDPAddr{
+			IP:   addr6.AsSlice(),
+			Zone: addr6.Zone(),
+		})
+		if listenEerr != nil {
+			t.Log("IPv6 is not supported on this machine")
+		}
+
+		testCases = append(testCases,
+			testCase{name: "IPv6Specified", conn: conn6Unspecified, network: udp6},
+		)
+	}
+
+	for _, subTest := range testCases {
 		network, conn := subTest.network, subTest.conn
 		if udpConn, ok := conn.(*net.UDPConn); !ok || udpConn == nil {
 			continue
@@ -110,47 +126,9 @@ func TestUDPMux(t *testing.T) {
 	}
 }
 
-func TestAddressEncoding(t *testing.T) {
-	cases := []struct {
-		name string
-		addr net.UDPAddr
-	}{
-		{
-			name: "empty address",
-		},
-		{
-			name: "ipv4",
-			addr: net.UDPAddr{
-				IP:   net.IPv4(244, 120, 0, 5),
-				Port: 6000,
-				Zone: "",
-			},
-		},
-		{
-			name: "ipv6",
-			addr: net.UDPAddr{
-				IP:   net.IPv6loopback,
-				Port: 2500,
-				Zone: "zone",
-			},
-		},
-	}
-
-	for _, c := range cases {
-		addr := c.addr
-		t.Run(c.name, func(t *testing.T) {
-			buf := make([]byte, maxAddrSize)
-			n, err := encodeUDPAddr(&addr, buf)
-			require.NoError(t, err)
-
-			parsedAddr, err := decodeUDPAddr(buf[:n])
-			require.NoError(t, err)
-			require.EqualValues(t, &addr, parsedAddr)
-		})
-	}
-}
-
 func testMuxConnection(t *testing.T, udpMux *UDPMuxDefault, ufrag string, network string) {
+	t.Helper()
+
 	pktConn, err := udpMux.GetConn(ufrag, udpMux.LocalAddr())
 	require.NoError(t, err, "error retrieving muxed connection for ufrag")
 	defer func() {
@@ -169,6 +147,8 @@ func testMuxConnection(t *testing.T, udpMux *UDPMuxDefault, ufrag string, networ
 }
 
 func testMuxConnectionPair(t *testing.T, pktConn net.PacketConn, remoteConn *net.UDPConn, ufrag string) {
+	t.Helper()
+
 	// Initial messages are dropped
 	_, err := remoteConn.Write([]byte("dropped bytes"))
 	require.NoError(t, err)
@@ -240,13 +220,13 @@ func testMuxConnectionPair(t *testing.T, pktConn net.PacketConn, remoteConn *net
 	for written := 0; written < targetSize; {
 		buf := make([]byte, receiveMTU)
 		// Byte 0-4: sequence
-		// Bytes 4-24: sha1 checksum
-		// Bytes2 4-mtu: random data
-		_, err := rand.Read(buf[24:])
+		// Bytes 4-36: sha256 checksum
+		// Bytes2 36-mtu: random data
+		_, err := rand.Read(buf[36:])
 		require.NoError(t, err)
-		h := sha1.Sum(buf[24:]) //nolint:gosec
-		copy(buf[4:24], h[:])
-		binary.LittleEndian.PutUint32(buf[0:4], uint32(sequence))
+		h := sha256.Sum256(buf[36:])
+		copy(buf[4:36], h[:])
+		binary.LittleEndian.PutUint32(buf[0:4], uint32(sequence)) //nolint:gosec // G115
 
 		_, err = remoteConn.Write(buf)
 		require.NoError(t, err)
@@ -262,18 +242,21 @@ func testMuxConnectionPair(t *testing.T, pktConn net.PacketConn, remoteConn *net
 }
 
 func verifyPacket(t *testing.T, b []byte, nextSeq uint32) {
+	t.Helper()
+
 	readSeq := binary.LittleEndian.Uint32(b[0:4])
 	require.Equal(t, nextSeq, readSeq)
-	h := sha1.Sum(b[24:]) //nolint:gosec
-	require.Equal(t, h[:], b[4:24])
+	h := sha256.Sum256(b[36:])
+	require.Equal(t, h[:], b[4:36])
 }
 
 func TestUDPMux_Agent_Restart(t *testing.T) {
 	oneSecond := time.Second
-	connA, connB := pipe(&AgentConfig{
+	connA, connB := pipe(t, &AgentConfig{
 		DisconnectedTimeout: &oneSecond,
 		FailedTimeout:       &oneSecond,
 	})
+	defer closePipe(t, connA, connB)
 
 	aNotifier, aConnected := onConnected()
 	require.NoError(t, connA.agent.OnConnectionStateChange(aNotifier))
@@ -296,12 +279,9 @@ func TestUDPMux_Agent_Restart(t *testing.T) {
 
 	require.NoError(t, connA.agent.SetRemoteCredentials(ufragB, pwdB))
 	require.NoError(t, connB.agent.SetRemoteCredentials(ufragA, pwdA))
-	gatherAndExchangeCandidates(connA.agent, connB.agent)
+	gatherAndExchangeCandidates(t, connA.agent, connB.agent)
 
 	// Wait until both have gone back to connected
 	<-aConnected
 	<-bConnected
-
-	require.NoError(t, connA.agent.Close())
-	require.NoError(t, connB.agent.Close())
 }

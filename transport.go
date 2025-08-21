@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 )
 
 // Dial connects to the remote agent, acting as the controlling ice agent.
@@ -27,23 +27,23 @@ func (a *Agent) Accept(ctx context.Context, remoteUfrag, remotePwd string) (*Con
 // Conn represents the ICE connection.
 // At the moment the lifetime of the Conn is equal to the Agent.
 type Conn struct {
-	bytesReceived uint64
-	bytesSent     uint64
+	bytesReceived atomic.Uint64
+	bytesSent     atomic.Uint64
 	agent         *Agent
 }
 
-// BytesSent returns the number of bytes sent
+// BytesSent returns the number of bytes sent.
 func (c *Conn) BytesSent() uint64 {
-	return atomic.LoadUint64(&c.bytesSent)
+	return c.bytesSent.Load()
 }
 
-// BytesReceived returns the number of bytes received
+// BytesReceived returns the number of bytes received.
 func (c *Conn) BytesReceived() uint64 {
-	return atomic.LoadUint64(&c.bytesReceived)
+	return c.bytesReceived.Load()
 }
 
 func (a *Agent) connect(ctx context.Context, isControlling bool, remoteUfrag, remotePwd string) (*Conn, error) {
-	err := a.ok()
+	err := a.loop.Err()
 	if err != nil {
 		return nil, err
 	}
@@ -54,8 +54,8 @@ func (a *Agent) connect(ctx context.Context, isControlling bool, remoteUfrag, re
 
 	// Block until pair selected
 	select {
-	case <-a.done:
-		return nil, a.getErr()
+	case <-a.loop.Done():
+		return nil, a.loop.Err()
 	case <-ctx.Done():
 		return nil, ErrCanceledByCaller
 	case <-a.onConnected:
@@ -68,31 +68,32 @@ func (a *Agent) connect(ctx context.Context, isControlling bool, remoteUfrag, re
 
 // Read implements the Conn Read method.
 func (c *Conn) Read(p []byte) (int, error) {
-	err := c.agent.ok()
+	err := c.agent.loop.Err()
 	if err != nil {
 		return 0, err
 	}
 
 	n, err := c.agent.buf.Read(p)
-	atomic.AddUint64(&c.bytesReceived, uint64(n))
+	c.bytesReceived.Add(uint64(n)) //nolint:gosec // G115
+
 	return n, err
 }
 
 // Write implements the Conn Write method.
-func (c *Conn) Write(p []byte) (int, error) {
-	err := c.agent.ok()
+func (c *Conn) Write(packet []byte) (int, error) {
+	err := c.agent.loop.Err()
 	if err != nil {
 		return 0, err
 	}
 
-	if stun.IsMessage(p) {
+	if stun.IsMessage(packet) {
 		return 0, errWriteSTUNMessageToIceConn
 	}
 
 	pair := c.agent.getSelectedPair()
 	if pair == nil {
-		if err = c.agent.run(c.agent.context(), func(ctx context.Context, a *Agent) {
-			pair = a.getBestValidCandidatePair()
+		if err = c.agent.loop.Run(c.agent.loop, func(_ context.Context) {
+			pair = c.agent.getBestValidCandidatePair()
 		}); err != nil {
 			return 0, err
 		}
@@ -102,8 +103,9 @@ func (c *Conn) Write(p []byte) (int, error) {
 		}
 	}
 
-	atomic.AddUint64(&c.bytesSent, uint64(len(p)))
-	return pair.Write(p)
+	c.bytesSent.Add(uint64(len(packet)))
+
+	return pair.Write(packet)
 }
 
 // Close implements the Conn Close method. It is used to close
@@ -132,17 +134,17 @@ func (c *Conn) RemoteAddr() net.Addr {
 	return pair.Remote.addr()
 }
 
-// SetDeadline is a stub
+// SetDeadline is a stub.
 func (c *Conn) SetDeadline(time.Time) error {
 	return nil
 }
 
-// SetReadDeadline is a stub
+// SetReadDeadline is a stub.
 func (c *Conn) SetReadDeadline(time.Time) error {
 	return nil
 }
 
-// SetWriteDeadline is a stub
+// SetWriteDeadline is a stub.
 func (c *Conn) SetWriteDeadline(time.Time) error {
 	return nil
 }

@@ -6,6 +6,8 @@ package ice
 import (
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRandomGeneratorCollision(t *testing.T) {
@@ -15,31 +17,33 @@ func TestRandomGeneratorCollision(t *testing.T) {
 		gen func(t *testing.T) string
 	}{
 		"CandidateID": {
-			gen: func(t *testing.T) string {
+			gen: func(*testing.T) string {
 				return candidateIDGen.Generate()
 			},
 		},
 		"PWD": {
 			gen: func(t *testing.T) string {
+				t.Helper()
+
 				s, err := generatePwd()
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
+
 				return s
 			},
 		},
 		"Ufrag": {
 			gen: func(t *testing.T) string {
+				t.Helper()
+
 				s, err := generateUFrag()
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
+
 				return s
 			},
 		},
 	}
 
-	const N = 100
+	const num = 100
 	const iteration = 100
 
 	for name, testCase := range testCases {
@@ -49,9 +53,9 @@ func TestRandomGeneratorCollision(t *testing.T) {
 				var wg sync.WaitGroup
 				var mu sync.Mutex
 
-				rands := make([]string, 0, N)
+				rands := make([]string, 0, num)
 
-				for i := 0; i < N; i++ {
+				for i := 0; i < num; i++ {
 					wg.Add(1)
 					go func() {
 						r := testCase.gen(t)
@@ -63,15 +67,10 @@ func TestRandomGeneratorCollision(t *testing.T) {
 				}
 				wg.Wait()
 
-				if len(rands) != N {
-					t.Fatal("Failed to generate randoms")
-				}
-
-				for i := 0; i < N; i++ {
-					for j := i + 1; j < N; j++ {
-						if rands[i] == rands[j] {
-							t.Fatalf("generateRandString caused collision: %s == %s", rands[i], rands[j])
-						}
+				require.Len(t, rands, num)
+				for i := 0; i < num; i++ {
+					for j := i + 1; j < num; j++ {
+						require.NotEqual(t, rands[i], rands[j])
 					}
 				}
 			}

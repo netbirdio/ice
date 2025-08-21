@@ -29,6 +29,7 @@ func NewMultiUDPMuxDefault(muxes ...UDPMux) *MultiUDPMuxDefault {
 			addrToMux[addr.String()] = mux
 		}
 	}
+
 	return &MultiUDPMuxDefault{
 		muxes:          muxes,
 		localAddrToMux: addrToMux,
@@ -42,6 +43,7 @@ func (m *MultiUDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketCon
 	if !ok {
 		return nil, errNoUDPMuxAvailable
 	}
+
 	return mux.GetConn(ufrag, addr)
 }
 
@@ -53,7 +55,7 @@ func (m *MultiUDPMuxDefault) RemoveConnByUfrag(ufrag string) {
 	}
 }
 
-// Close the multi mux, no further connections could be created
+// Close the multi mux, no further connections could be created.
 func (m *MultiUDPMuxDefault) Close() error {
 	var err error
 	for _, mux := range m.muxes {
@@ -61,21 +63,23 @@ func (m *MultiUDPMuxDefault) Close() error {
 			err = e
 		}
 	}
+
 	return err
 }
 
-// GetListenAddresses returns the list of addresses that this mux is listening on
+// GetListenAddresses returns the list of addresses that this mux is listening on.
 func (m *MultiUDPMuxDefault) GetListenAddresses() []net.Addr {
 	addrs := make([]net.Addr, 0, len(m.localAddrToMux))
 	for _, mux := range m.muxes {
 		addrs = append(addrs, mux.GetListenAddresses()...)
 	}
+
 	return addrs
 }
 
 // NewMultiUDPMuxFromPort creates an instance of MultiUDPMuxDefault that
 // listen all interfaces on the provided port.
-func NewMultiUDPMuxFromPort(port int, opts ...UDPMuxFromPortOption) (*MultiUDPMuxDefault, error) {
+func NewMultiUDPMuxFromPort(port int, opts ...UDPMuxFromPortOption) (*MultiUDPMuxDefault, error) { //nolint:cyclop
 	params := multiUDPMuxFromPortParam{
 		networks: []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
 	}
@@ -90,16 +94,21 @@ func NewMultiUDPMuxFromPort(port int, opts ...UDPMuxFromPortOption) (*MultiUDPMu
 		}
 	}
 
-	ips, err := localInterfaces(params.net, params.ifFilter, params.ipFilter, params.networks, params.includeLoopback)
+	_, addrs, err := localInterfaces(params.net, params.ifFilter, params.ipFilter, params.networks, params.includeLoopback)
 	if err != nil {
 		return nil, err
 	}
 
-	conns := make([]net.PacketConn, 0, len(ips))
-	for _, ip := range ips {
-		conn, listenErr := params.net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: port})
+	conns := make([]net.PacketConn, 0, len(addrs))
+	for _, addr := range addrs {
+		conn, listenErr := params.net.ListenUDP("udp", &net.UDPAddr{
+			IP:   addr.AsSlice(),
+			Port: port,
+			Zone: addr.Zone(),
+		})
 		if listenErr != nil {
 			err = listenErr
+
 			break
 		}
 		if params.readBufferSize > 0 {
@@ -115,6 +124,7 @@ func NewMultiUDPMuxFromPort(port int, opts ...UDPMuxFromPortOption) (*MultiUDPMu
 		for _, conn := range conns {
 			_ = conn.Close()
 		}
+
 		return nil, err
 	}
 
@@ -131,14 +141,14 @@ func NewMultiUDPMuxFromPort(port int, opts ...UDPMuxFromPortOption) (*MultiUDPMu
 	return NewMultiUDPMuxDefault(muxes...), nil
 }
 
-// UDPMuxFromPortOption provide options for NewMultiUDPMuxFromPort
+// UDPMuxFromPortOption provide options for NewMultiUDPMuxFromPort.
 type UDPMuxFromPortOption interface {
 	apply(*multiUDPMuxFromPortParam)
 }
 
 type multiUDPMuxFromPortParam struct {
-	ifFilter        func(string) bool
-	ipFilter        func(ip net.IP) bool
+	ifFilter        func(string) (keep bool)
+	ipFilter        func(ip net.IP) (keep bool)
 	networks        []NetworkType
 	readBufferSize  int
 	writeBufferSize int
@@ -155,8 +165,8 @@ func (o *udpMuxFromPortOption) apply(p *multiUDPMuxFromPortParam) {
 	o.f(p)
 }
 
-// UDPMuxFromPortWithInterfaceFilter set the filter to filter out interfaces that should not be used
-func UDPMuxFromPortWithInterfaceFilter(f func(string) bool) UDPMuxFromPortOption {
+// UDPMuxFromPortWithInterfaceFilter set the filter to filter out interfaces that should not be used.
+func UDPMuxFromPortWithInterfaceFilter(f func(string) (keep bool)) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
 			p.ifFilter = f
@@ -164,8 +174,8 @@ func UDPMuxFromPortWithInterfaceFilter(f func(string) bool) UDPMuxFromPortOption
 	}
 }
 
-// UDPMuxFromPortWithIPFilter set the filter to filter out IP addresses that should not be used
-func UDPMuxFromPortWithIPFilter(f func(ip net.IP) bool) UDPMuxFromPortOption {
+// UDPMuxFromPortWithIPFilter set the filter to filter out IP addresses that should not be used.
+func UDPMuxFromPortWithIPFilter(f func(ip net.IP) (keep bool)) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
 			p.ipFilter = f
@@ -173,7 +183,7 @@ func UDPMuxFromPortWithIPFilter(f func(ip net.IP) bool) UDPMuxFromPortOption {
 	}
 }
 
-// UDPMuxFromPortWithNetworks set the networks that should be used. default is both IPv4 and IPv6
+// UDPMuxFromPortWithNetworks set the networks that should be used. default is both IPv4 and IPv6.
 func UDPMuxFromPortWithNetworks(networks ...NetworkType) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
@@ -182,7 +192,7 @@ func UDPMuxFromPortWithNetworks(networks ...NetworkType) UDPMuxFromPortOption {
 	}
 }
 
-// UDPMuxFromPortWithReadBufferSize set the UDP connection read buffer size
+// UDPMuxFromPortWithReadBufferSize set the UDP connection read buffer size.
 func UDPMuxFromPortWithReadBufferSize(size int) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
@@ -191,7 +201,7 @@ func UDPMuxFromPortWithReadBufferSize(size int) UDPMuxFromPortOption {
 	}
 }
 
-// UDPMuxFromPortWithWriteBufferSize set the UDP connection write buffer size
+// UDPMuxFromPortWithWriteBufferSize set the UDP connection write buffer size.
 func UDPMuxFromPortWithWriteBufferSize(size int) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
@@ -200,7 +210,7 @@ func UDPMuxFromPortWithWriteBufferSize(size int) UDPMuxFromPortOption {
 	}
 }
 
-// UDPMuxFromPortWithLogger set the logger for the created UDPMux
+// UDPMuxFromPortWithLogger set the logger for the created UDPMux.
 func UDPMuxFromPortWithLogger(logger logging.LeveledLogger) UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {
@@ -209,7 +219,7 @@ func UDPMuxFromPortWithLogger(logger logging.LeveledLogger) UDPMuxFromPortOption
 	}
 }
 
-// UDPMuxFromPortWithLoopback set loopback interface should be included
+// UDPMuxFromPortWithLoopback set loopback interface should be included.
 func UDPMuxFromPortWithLoopback() UDPMuxFromPortOption {
 	return &udpMuxFromPortOption{
 		f: func(p *multiUDPMuxFromPortParam) {

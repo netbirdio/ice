@@ -6,14 +6,16 @@
 //nolint:dupl
 package ice
 
-import "net"
+import (
+	"net/netip"
+)
 
 // CandidatePeerReflexive ...
 type CandidatePeerReflexive struct {
 	candidateBase
 }
 
-// CandidatePeerReflexiveConfig is the config required to create a new CandidatePeerReflexive
+// CandidatePeerReflexiveConfig is the config required to create a new CandidatePeerReflexive.
 type CandidatePeerReflexiveConfig struct {
 	CandidateID string
 	Network     string
@@ -26,14 +28,14 @@ type CandidatePeerReflexiveConfig struct {
 	RelPort     int
 }
 
-// NewCandidatePeerReflexive creates a new peer reflective candidate
+// NewCandidatePeerReflexive creates a new peer reflective candidate.
 func NewCandidatePeerReflexive(config *CandidatePeerReflexiveConfig) (*CandidatePeerReflexive, error) {
-	ip := net.ParseIP(config.Address)
-	if ip == nil {
-		return nil, ErrAddressParseFailed
+	ipAddr, err := netip.ParseAddr(config.Address)
+	if err != nil {
+		return nil, err
 	}
 
-	networkType, err := determineNetworkType(config.Network, ip)
+	networkType, err := determineNetworkType(config.Network, ipAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +52,7 @@ func NewCandidatePeerReflexive(config *CandidatePeerReflexiveConfig) (*Candidate
 			candidateType:      CandidateTypePeerReflexive,
 			address:            config.Address,
 			port:               config.Port,
-			resolvedAddr:       createAddr(networkType, ip, config.Port),
+			resolvedAddr:       createAddr(networkType, ipAddr, config.Port),
 			component:          config.Component,
 			foundationOverride: config.Foundation,
 			priorityOverride:   config.Priority,

@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,8 +25,7 @@ func TestTCPMux_Recv(t *testing.T) {
 	} {
 		bufSize := bufSize
 		t.Run(name, func(t *testing.T) {
-			report := test.CheckRoutines(t)
-			defer report()
+			defer test.CheckRoutines(t)()
 
 			loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -53,7 +51,7 @@ func TestTCPMux_Recv(t *testing.T) {
 
 			require.NotNil(t, tcpMux.LocalAddr(), "tcpMux.LocalAddr() is nil")
 
-			conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr))
+			conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr)) // nolint
 			require.NoError(t, err, "error dialing test TCP connection")
 
 			msg := stun.New()
@@ -64,7 +62,10 @@ func TestTCPMux_Recv(t *testing.T) {
 			n, err := writeStreamingPacket(conn, msg.Raw)
 			require.NoError(t, err, "error writing TCP STUN packet")
 
-			pktConn, err := tcpMux.GetConnByUfrag("myufrag", false, listener.Addr().(*net.TCPAddr).IP)
+			listenerAddr, ok := listener.Addr().(*net.TCPAddr)
+			require.True(t, ok)
+
+			pktConn, err := tcpMux.GetConnByUfrag("myufrag", false, listenerAddr.IP)
 			require.NoError(t, err, "error retrieving muxed connection for ufrag")
 			defer func() {
 				_ = pktConn.Close()
@@ -73,9 +74,9 @@ func TestTCPMux_Recv(t *testing.T) {
 			recv := make([]byte, n)
 			n2, rAddr, err := pktConn.ReadFrom(recv)
 			require.NoError(t, err, "error receiving data")
-			assert.Equal(t, conn.LocalAddr(), rAddr, "remote tcp address mismatch")
-			assert.Equal(t, n, n2, "received byte size mismatch")
-			assert.Equal(t, msg.Raw, recv, "received bytes mismatch")
+			require.Equal(t, conn.LocalAddr(), rAddr, "remote tcp address mismatch")
+			require.Equal(t, n, n2, "received byte size mismatch")
+			require.Equal(t, msg.Raw, recv, "received bytes mismatch")
 
 			// Check echo response
 			n, err = pktConn.WriteTo(recv, conn.LocalAddr())
@@ -83,15 +84,14 @@ func TestTCPMux_Recv(t *testing.T) {
 			recvEcho := make([]byte, n)
 			n3, err := readStreamingPacket(conn, recvEcho)
 			require.NoError(t, err, "error receiving echo data")
-			assert.Equal(t, n2, n3, "received byte size mismatch")
-			assert.Equal(t, msg.Raw, recvEcho, "received bytes mismatch")
+			require.Equal(t, n2, n3, "received byte size mismatch")
+			require.Equal(t, msg.Raw, recvEcho, "received bytes mismatch")
 		})
 	}
 }
 
 func TestTCPMux_NoDeadlockWhenClosingUnusedPacketConn(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -114,19 +114,21 @@ func TestTCPMux_NoDeadlockWhenClosingUnusedPacketConn(t *testing.T) {
 		_ = tcpMux.Close()
 	}()
 
-	_, err = tcpMux.GetConnByUfrag("test", false, listener.Addr().(*net.TCPAddr).IP)
+	listenerAddr, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+
+	_, err = tcpMux.GetConnByUfrag("test", false, listenerAddr.IP)
 	require.NoError(t, err, "error getting conn by ufrag")
 
 	require.NoError(t, tcpMux.Close(), "error closing tcpMux")
 
-	conn, err := tcpMux.GetConnByUfrag("test", false, listener.Addr().(*net.TCPAddr).IP)
-	assert.Nil(t, conn, "should receive nil because mux is closed")
-	assert.Equal(t, io.ErrClosedPipe, err, "should receive error because mux is closed")
+	conn, err := tcpMux.GetConnByUfrag("test", false, listenerAddr.IP)
+	require.Nil(t, conn, "should receive nil because mux is closed")
+	require.Equal(t, io.ErrClosedPipe, err, "should receive error because mux is closed")
 }
 
 func TestTCPMux_FirstPacketTimeout(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -148,7 +150,7 @@ func TestTCPMux_FirstPacketTimeout(t *testing.T) {
 
 	require.NotNil(t, tcpMux.LocalAddr(), "tcpMux.LocalAddr() is nil")
 
-	conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr))
+	conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr)) // nolint
 	require.NoError(t, err, "error dialing test TCP connection")
 	defer func() {
 		_ = conn.Close()
@@ -163,8 +165,7 @@ func TestTCPMux_FirstPacketTimeout(t *testing.T) {
 }
 
 func TestTCPMux_NoLeakForConnectionFromStun(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	loggerFactory := logging.NewDefaultLoggerFactory()
 
@@ -191,7 +192,7 @@ func TestTCPMux_NoLeakForConnectionFromStun(t *testing.T) {
 	require.NotNil(t, tcpMux.LocalAddr(), "tcpMux.LocalAddr() is nil")
 
 	t.Run("close connection from stun msg after timeout", func(t *testing.T) {
-		conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr))
+		conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr)) // nolint
 		require.NoError(t, err, "error dialing test TCP connection")
 		defer func() {
 			_ = conn.Close()
@@ -216,7 +217,7 @@ func TestTCPMux_NoLeakForConnectionFromStun(t *testing.T) {
 	})
 
 	t.Run("connection keep alive if access by user", func(t *testing.T) {
-		conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr))
+		conn, err := net.DialTCP("tcp", nil, tcpMux.LocalAddr().(*net.TCPAddr)) // nolint
 		require.NoError(t, err, "error dialing test TCP connection")
 		defer func() {
 			_ = conn.Close()
@@ -236,7 +237,10 @@ func TestTCPMux_NoLeakForConnectionFromStun(t *testing.T) {
 		// wait for the connection to be created
 		time.Sleep(100 * time.Millisecond)
 
-		pktConn, err := tcpMux.GetConnByUfrag("myufrag2", false, listener.Addr().(*net.TCPAddr).IP)
+		listenerAddr, ok := listener.Addr().(*net.TCPAddr)
+		require.True(t, ok)
+
+		pktConn, err := tcpMux.GetConnByUfrag("myufrag2", false, listenerAddr.IP)
 		require.NoError(t, err, "error retrieving muxed connection for ufrag")
 		defer func() {
 			_ = pktConn.Close()
@@ -253,8 +257,8 @@ func TestTCPMux_NoLeakForConnectionFromStun(t *testing.T) {
 		recv := make([]byte, n)
 		n2, rAddr, err := pktConn.ReadFrom(recv)
 		require.NoError(t, err, "error receiving data")
-		assert.Equal(t, conn.LocalAddr(), rAddr, "remote tcp address mismatch")
-		assert.Equal(t, n, n2, "received byte size mismatch")
-		assert.Equal(t, msg.Raw, recv, "received bytes mismatch")
+		require.Equal(t, conn.LocalAddr(), rAddr, "remote tcp address mismatch")
+		require.Equal(t, n, n2, "received byte size mismatch")
+		require.Equal(t, msg.Raw, recv, "received bytes mismatch")
 	})
 }

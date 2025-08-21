@@ -9,37 +9,36 @@ package ice
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStressDuplex(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	// Run the test
 	stressDuplex(t)
 }
 
-func testTimeout(t *testing.T, c *Conn, timeout time.Duration) {
+func testTimeout(t *testing.T, conn *Conn, timeout time.Duration) {
+	t.Helper()
+
 	const pollRate = 100 * time.Millisecond
 	const margin = 20 * time.Millisecond // Allow 20msec error in time
 	ticker := time.NewTicker(pollRate)
 	defer func() {
 		ticker.Stop()
-		err := c.Close()
-		if err != nil {
-			t.Error(err)
-		}
+		require.NoError(t, conn.Close())
 	}()
 
 	startedAt := time.Now()
@@ -49,25 +48,18 @@ func testTimeout(t *testing.T, c *Conn, timeout time.Duration) {
 
 		var cs ConnectionState
 
-		err := c.agent.run(context.Background(), func(ctx context.Context, agent *Agent) {
-			cs = agent.connectionState
-		})
-		if err != nil {
-			// We should never get here.
-			panic(err)
-		}
+		require.NoError(t, conn.agent.loop.Run(context.Background(), func(_ context.Context) {
+			cs = conn.agent.connectionState
+		}))
 
 		if cs != ConnectionStateConnected {
 			elapsed := time.Since(startedAt)
-			if elapsed+margin < timeout {
-				t.Fatalf("Connection timed out %f msec early", elapsed.Seconds()*1000)
-			} else {
-				t.Logf("Connection timed out in %f msec", elapsed.Seconds()*1000)
-				return
-			}
+			require.Less(t, timeout, elapsed+margin)
+
+			return
 		}
 	}
-	t.Fatalf("Connection failed to time out in time. (expected timeout: %v)", timeout)
+	t.Fatalf("Connection failed to time out in time. (expected timeout: %v)", timeout) //nolint
 }
 
 func TestTimeout(t *testing.T) {
@@ -76,78 +68,48 @@ func TestTimeout(t *testing.T) {
 	}
 
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
 	t.Run("WithoutDisconnectTimeout", func(t *testing.T) {
-		ca, cb := pipe(nil)
-		err := cb.Close()
-		if err != nil {
-			// We should never get here.
-			panic(err)
-		}
-
+		ca, cb := pipe(t, nil)
+		require.NoError(t, cb.Close())
 		testTimeout(t, ca, defaultDisconnectedTimeout)
 	})
 
 	t.Run("WithDisconnectTimeout", func(t *testing.T) {
-		ca, cb := pipeWithTimeout(5*time.Second, 3*time.Second)
-		err := cb.Close()
-		if err != nil {
-			// We should never get here.
-			panic(err)
-		}
-
+		ca, cb := pipeWithTimeout(t, 5*time.Second, 3*time.Second)
+		require.NoError(t, cb.Close())
 		testTimeout(t, ca, 5*time.Second)
 	})
 }
 
 func TestReadClosed(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
-	ca, cb := pipe(nil)
-
-	err := ca.Close()
-	if err != nil {
-		// We should never get here.
-		panic(err)
-	}
-
-	err = cb.Close()
-	if err != nil {
-		// We should never get here.
-		panic(err)
-	}
+	ca, cb := pipe(t, nil)
+	require.NoError(t, ca.Close())
+	require.NoError(t, cb.Close())
 
 	empty := make([]byte, 10)
-	_, err = ca.Read(empty)
-	if err == nil {
-		t.Fatalf("Reading from a closed channel should return an error")
-	}
+	_, err := ca.Read(empty)
+	require.Error(t, err)
 }
 
 func stressDuplex(t *testing.T) {
-	ca, cb := pipe(nil)
+	t.Helper()
+
+	ca, cb := pipe(t, nil)
 
 	defer func() {
-		err := ca.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = cb.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, ca.Close())
+		require.NoError(t, cb.Close())
 	}()
 
 	opt := test.Options{
@@ -155,57 +117,55 @@ func stressDuplex(t *testing.T) {
 		MsgCount: 1, // Order not reliable due to UDP & potentially multiple candidate pairs.
 	}
 
-	err := test.StressDuplex(ca, cb, opt)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, test.StressDuplex(ca, cb, opt))
 }
 
-func check(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
-func gatherAndExchangeCandidates(aAgent, bAgent *Agent) {
+func gatherAndExchangeCandidates(t *testing.T, aAgent, bAgent *Agent) {
+	t.Helper()
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	check(aAgent.OnCandidate(func(candidate Candidate) {
+	require.NoError(t, aAgent.OnCandidate(func(candidate Candidate) {
 		if candidate == nil {
 			wg.Done()
 		}
 	}))
-	check(aAgent.GatherCandidates())
+	require.NoError(t, aAgent.GatherCandidates())
 
-	check(bAgent.OnCandidate(func(candidate Candidate) {
+	require.NoError(t, bAgent.OnCandidate(func(candidate Candidate) {
 		if candidate == nil {
 			wg.Done()
 		}
 	}))
-	check(bAgent.GatherCandidates())
+	require.NoError(t, bAgent.GatherCandidates())
 
 	wg.Wait()
 
 	candidates, err := aAgent.GetLocalCandidates()
-	check(err)
+	require.NoError(t, err)
+
 	for _, c := range candidates {
+		if addr, parseErr := netip.ParseAddr(c.Address()); parseErr == nil {
+			require.False(t, shouldFilterLocationTrackedIP(addr))
+		}
 		candidateCopy, copyErr := c.copy()
-		check(copyErr)
-		check(bAgent.AddRemoteCandidate(candidateCopy))
+		require.NoError(t, copyErr)
+		require.NoError(t, bAgent.AddRemoteCandidate(candidateCopy))
 	}
 
 	candidates, err = bAgent.GetLocalCandidates()
-	check(err)
+
+	require.NoError(t, err)
 	for _, c := range candidates {
 		candidateCopy, copyErr := c.copy()
-		check(copyErr)
-		check(aAgent.AddRemoteCandidate(candidateCopy))
+		require.NoError(t, copyErr)
+		require.NoError(t, aAgent.AddRemoteCandidate(candidateCopy))
 	}
 }
 
-func connect(aAgent, bAgent *Agent) (*Conn, *Conn) {
-	gatherAndExchangeCandidates(aAgent, bAgent)
+func connect(t *testing.T, aAgent, bAgent *Agent) (*Conn, *Conn) {
+	t.Helper()
+	gatherAndExchangeCandidates(t, aAgent, bAgent)
 
 	accepted := make(chan struct{})
 	var aConn *Conn
@@ -213,22 +173,24 @@ func connect(aAgent, bAgent *Agent) (*Conn, *Conn) {
 	go func() {
 		var acceptErr error
 		bUfrag, bPwd, acceptErr := bAgent.GetLocalUserCredentials()
-		check(acceptErr)
+		require.NoError(t, acceptErr)
 		aConn, acceptErr = aAgent.Accept(context.TODO(), bUfrag, bPwd)
-		check(acceptErr)
+		require.NoError(t, acceptErr)
 		close(accepted)
 	}()
 	aUfrag, aPwd, err := aAgent.GetLocalUserCredentials()
-	check(err)
+	require.NoError(t, err)
 	bConn, err := bAgent.Dial(context.TODO(), aUfrag, aPwd)
-	check(err)
+	require.NoError(t, err)
 
 	// Ensure accepted
 	<-accepted
+
 	return aConn, bConn
 }
 
-func pipe(defaultConfig *AgentConfig) (*Conn, *Conn) {
+func pipe(t *testing.T, defaultConfig *AgentConfig) (*Conn, *Conn) {
+	t.Helper()
 	var urls []*stun.URI
 
 	aNotifier, aConnected := onConnected()
@@ -243,15 +205,15 @@ func pipe(defaultConfig *AgentConfig) (*Conn, *Conn) {
 	cfg.NetworkTypes = supportedNetworkTypes()
 
 	aAgent, err := NewAgent(cfg)
-	check(err)
-	check(aAgent.OnConnectionStateChange(aNotifier))
+	require.NoError(t, err)
+	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	bAgent, err := NewAgent(cfg)
-	check(err)
+	require.NoError(t, err)
 
-	check(bAgent.OnConnectionStateChange(bNotifier))
+	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	aConn, bConn := connect(aAgent, bAgent)
+	aConn, bConn := connect(t, aAgent, bAgent)
 
 	// Ensure pair selected
 	// Note: this assumes ConnectionStateConnected is thrown after selecting the final pair
@@ -261,7 +223,8 @@ func pipe(defaultConfig *AgentConfig) (*Conn, *Conn) {
 	return aConn, bConn
 }
 
-func pipeWithTimeout(disconnectTimeout time.Duration, iceKeepalive time.Duration) (*Conn, *Conn) {
+func pipeWithTimeout(t *testing.T, disconnectTimeout time.Duration, iceKeepalive time.Duration) (*Conn, *Conn) {
+	t.Helper()
 	var urls []*stun.URI
 
 	aNotifier, aConnected := onConnected()
@@ -275,14 +238,14 @@ func pipeWithTimeout(disconnectTimeout time.Duration, iceKeepalive time.Duration
 	}
 
 	aAgent, err := NewAgent(cfg)
-	check(err)
-	check(aAgent.OnConnectionStateChange(aNotifier))
+	require.NoError(t, err)
+	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	bAgent, err := NewAgent(cfg)
-	check(err)
-	check(bAgent.OnConnectionStateChange(bNotifier))
+	require.NoError(t, err)
+	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	aConn, bConn := connect(aAgent, bAgent)
+	aConn, bConn := connect(t, aAgent, bAgent)
 
 	// Ensure pair selected
 	// Note: this assumes ConnectionStateConnected is thrown after selecting the final pair
@@ -294,6 +257,7 @@ func pipeWithTimeout(disconnectTimeout time.Duration, iceKeepalive time.Duration
 
 func onConnected() (func(ConnectionState), chan struct{}) {
 	done := make(chan struct{})
+
 	return func(state ConnectionState) {
 		if state == ConnectionStateConnected {
 			close(done)
@@ -301,11 +265,11 @@ func onConnected() (func(ConnectionState), chan struct{}) {
 	}, done
 }
 
-func randomPort(t testing.TB) int {
-	t.Helper()
+func randomPort(tb testing.TB) int {
+	tb.Helper()
 	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to pickPort: %v", err)
+		tb.Fatalf("failed to pickPort: %v", err)
 	}
 	defer func() {
 		_ = conn.Close()
@@ -314,54 +278,35 @@ func randomPort(t testing.TB) int {
 	case *net.UDPAddr:
 		return addr.Port
 	default:
-		t.Fatalf("unknown addr type %T", addr)
+		tb.Fatalf("unknown addr type %T", addr)
+
 		return 0
 	}
 }
 
 func TestConnStats(t *testing.T) {
 	// Check for leaking routines
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 20)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 20).Stop()
 
-	ca, cb := pipe(nil)
-	if _, err := ca.Write(make([]byte, 10)); err != nil {
-		t.Fatal("unexpected error trying to write")
-	}
+	ca, cb := pipe(t, nil)
+	_, err := ca.Write(make([]byte, 10))
+	require.NoError(t, err)
+	defer closePipe(t, ca, cb)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		buf := make([]byte, 10)
-		if _, err := cb.Read(buf); err != nil {
-			panic(errRead)
-		}
+		_, err := cb.Read(buf)
+		require.NoError(t, err)
 		wg.Done()
 	}()
 
 	wg.Wait()
 
-	if ca.BytesSent() != 10 {
-		t.Fatal("bytes sent don't match")
-	}
-
-	if cb.BytesReceived() != 10 {
-		t.Fatal("bytes received don't match")
-	}
-
-	err := ca.Close()
-	if err != nil {
-		// We should never get here.
-		panic(err)
-	}
-
-	err = cb.Close()
-	if err != nil {
-		// We should never get here.
-		panic(err)
-	}
+	require.Equal(t, uint64(10), ca.BytesSent())
+	require.Equal(t, uint64(10), cb.BytesReceived())
 }

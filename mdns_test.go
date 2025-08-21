@@ -13,140 +13,187 @@ import (
 	"time"
 
 	"github.com/pion/transport/v3/test"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMulticastDNSOnlyConnection(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
-	cfg := &AgentConfig{
-		NetworkTypes:     []NetworkType{NetworkTypeUDP4},
-		CandidateTypes:   []CandidateType{CandidateTypeHost},
-		MulticastDNSMode: MulticastDNSModeQueryAndGather,
+	type testCase struct {
+		Name         string
+		NetworkTypes []NetworkType
 	}
 
-	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
+	testCases := []testCase{
+		{Name: "UDP4", NetworkTypes: []NetworkType{NetworkTypeUDP4}},
 	}
 
-	aNotifier, aConnected := onConnected()
-	if err = aAgent.OnConnectionStateChange(aNotifier); err != nil {
-		t.Fatal(err)
+	if ipv6Available(t) {
+		testCases = append(testCases,
+			testCase{Name: "UDP6", NetworkTypes: []NetworkType{NetworkTypeUDP6}},
+			testCase{Name: "UDP46", NetworkTypes: []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6}},
+		)
 	}
 
-	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			cfg := &AgentConfig{
+				NetworkTypes:     tc.NetworkTypes,
+				CandidateTypes:   []CandidateType{CandidateTypeHost},
+				MulticastDNSMode: MulticastDNSModeQueryAndGather,
+				InterfaceFilter:  problematicNetworkInterfaces,
+			}
+
+			aAgent, err := NewAgent(cfg)
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, aAgent.Close())
+			}()
+
+			aNotifier, aConnected := onConnected()
+			require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
+
+			bAgent, err := NewAgent(cfg)
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, bAgent.Close())
+			}()
+
+			bNotifier, bConnected := onConnected()
+			require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
+
+			connect(t, aAgent, bAgent)
+			<-aConnected
+			<-bConnected
+		})
 	}
-
-	bNotifier, bConnected := onConnected()
-	if err = bAgent.OnConnectionStateChange(bNotifier); err != nil {
-		t.Fatal(err)
-	}
-
-	connect(aAgent, bAgent)
-	<-aConnected
-	<-bConnected
-
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
 func TestMulticastDNSMixedConnection(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
-	aAgent, err := NewAgent(&AgentConfig{
-		NetworkTypes:     []NetworkType{NetworkTypeUDP4},
-		CandidateTypes:   []CandidateType{CandidateTypeHost},
-		MulticastDNSMode: MulticastDNSModeQueryAndGather,
-	})
-	if err != nil {
-		t.Fatal(err)
+	type testCase struct {
+		Name         string
+		NetworkTypes []NetworkType
 	}
 
-	aNotifier, aConnected := onConnected()
-	if err = aAgent.OnConnectionStateChange(aNotifier); err != nil {
-		t.Fatal(err)
+	testCases := []testCase{
+		{Name: "UDP4", NetworkTypes: []NetworkType{NetworkTypeUDP4}},
 	}
 
-	bAgent, err := NewAgent(&AgentConfig{
-		NetworkTypes:     []NetworkType{NetworkTypeUDP4},
-		CandidateTypes:   []CandidateType{CandidateTypeHost},
-		MulticastDNSMode: MulticastDNSModeQueryOnly,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if ipv6Available(t) {
+		testCases = append(testCases,
+			testCase{Name: "UDP6", NetworkTypes: []NetworkType{NetworkTypeUDP6}},
+			testCase{Name: "UDP46", NetworkTypes: []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6}},
+		)
 	}
 
-	bNotifier, bConnected := onConnected()
-	if err = bAgent.OnConnectionStateChange(bNotifier); err != nil {
-		t.Fatal(err)
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			aAgent, err := NewAgent(&AgentConfig{
+				NetworkTypes:     tc.NetworkTypes,
+				CandidateTypes:   []CandidateType{CandidateTypeHost},
+				MulticastDNSMode: MulticastDNSModeQueryAndGather,
+				InterfaceFilter:  problematicNetworkInterfaces,
+			})
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, aAgent.Close())
+			}()
+
+			aNotifier, aConnected := onConnected()
+			require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
+
+			bAgent, err := NewAgent(&AgentConfig{
+				NetworkTypes:     tc.NetworkTypes,
+				CandidateTypes:   []CandidateType{CandidateTypeHost},
+				MulticastDNSMode: MulticastDNSModeQueryOnly,
+				InterfaceFilter:  problematicNetworkInterfaces,
+			})
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, bAgent.Close())
+			}()
+
+			bNotifier, bConnected := onConnected()
+			require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
+
+			connect(t, aAgent, bAgent)
+			<-aConnected
+			<-bConnected
+		})
 	}
-
-	connect(aAgent, bAgent)
-	<-aConnected
-	<-bConnected
-
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
 func TestMulticastDNSStaticHostName(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
-	_, err := NewAgent(&AgentConfig{
-		NetworkTypes:         []NetworkType{NetworkTypeUDP4},
-		CandidateTypes:       []CandidateType{CandidateTypeHost},
-		MulticastDNSMode:     MulticastDNSModeQueryAndGather,
-		MulticastDNSHostName: "invalidHostName",
-	})
-	assert.Equal(t, err, ErrInvalidMulticastDNSHostName)
+	type testCase struct {
+		Name         string
+		NetworkTypes []NetworkType
+	}
 
-	agent, err := NewAgent(&AgentConfig{
-		NetworkTypes:         []NetworkType{NetworkTypeUDP4},
-		CandidateTypes:       []CandidateType{CandidateTypeHost},
-		MulticastDNSMode:     MulticastDNSModeQueryAndGather,
-		MulticastDNSHostName: "validName.local",
-	})
-	assert.NoError(t, err)
+	testCases := []testCase{
+		{Name: "UDP4", NetworkTypes: []NetworkType{NetworkTypeUDP4}},
+	}
 
-	correctHostName, resolveFunc := context.WithCancel(context.Background())
-	assert.NoError(t, agent.OnCandidate(func(c Candidate) {
-		if c != nil && c.Address() == "validName.local" {
-			resolveFunc()
-		}
-	}))
+	if ipv6Available(t) {
+		testCases = append(testCases,
+			testCase{Name: "UDP6", NetworkTypes: []NetworkType{NetworkTypeUDP6}},
+			testCase{Name: "UDP46", NetworkTypes: []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6}},
+		)
+	}
 
-	assert.NoError(t, agent.GatherCandidates())
-	<-correctHostName.Done()
-	assert.NoError(t, agent.Close())
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			_, err := NewAgent(&AgentConfig{
+				NetworkTypes:         tc.NetworkTypes,
+				CandidateTypes:       []CandidateType{CandidateTypeHost},
+				MulticastDNSMode:     MulticastDNSModeQueryAndGather,
+				MulticastDNSHostName: "invalidHostName",
+				InterfaceFilter:      problematicNetworkInterfaces,
+			})
+			require.Equal(t, err, ErrInvalidMulticastDNSHostName)
+
+			agent, err := NewAgent(&AgentConfig{
+				NetworkTypes:         tc.NetworkTypes,
+				CandidateTypes:       []CandidateType{CandidateTypeHost},
+				MulticastDNSMode:     MulticastDNSModeQueryAndGather,
+				MulticastDNSHostName: "validName.local",
+				InterfaceFilter:      problematicNetworkInterfaces,
+			})
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, agent.Close())
+			}()
+
+			correctHostName, resolveFunc := context.WithCancel(context.Background())
+			require.NoError(t, agent.OnCandidate(func(c Candidate) {
+				if c != nil && c.Address() == "validName.local" {
+					resolveFunc()
+				}
+			}))
+
+			require.NoError(t, agent.GatherCandidates())
+			<-correctHostName.Done()
+		})
+	}
 }
 
 func TestGenerateMulticastDNSName(t *testing.T) {
 	name, err := generateMulticastDNSName()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	isMDNSName := regexp.MustCompile(
 		`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}.local+$`,
 	).MatchString
 
-	if !isMDNSName(name) {
-		t.Fatalf("mDNS name must be UUID v4 + \".local\" suffix, got %s", name)
-	}
+	require.True(t, isMDNSName(name))
 }
