@@ -38,13 +38,13 @@ func NewMultiUDPMuxDefault(muxes ...UDPMux) *MultiUDPMuxDefault {
 
 // GetConn returns a PacketConn given the connection's ufrag and network
 // creates the connection if an existing one can't be found.
-func (m *MultiUDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketConn, error) {
+func (m *MultiUDPMuxDefault) GetConn(ufrag string, addr net.Addr, candidateID string) (net.PacketConn, error) {
 	mux, ok := m.localAddrToMux[addr.String()]
 	if !ok {
 		return nil, errNoUDPMuxAvailable
 	}
 
-	return mux.GetConn(ufrag, addr)
+	return mux.GetConn(ufrag, addr, candidateID)
 }
 
 // RemoveConnByUfrag stops and removes the muxed packet connection

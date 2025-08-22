@@ -434,12 +434,13 @@ func (c *candidateBase) DeepEqual(other Candidate) bool {
 // String makes the candidateBase printable.
 func (c *candidateBase) String() string {
 	return fmt.Sprintf(
-		"%s %s %s%s (resolved: %v)",
+		"%s %s %s%s (resolved: %v) %s",
 		c.NetworkType(),
 		c.Type(),
 		net.JoinHostPort(c.Address(), strconv.Itoa(c.Port())),
 		c.relatedAddress,
 		c.resolvedAddr,
+		c.id,
 	)
 }
 
@@ -791,12 +792,14 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 		}
 	}
 
+	candidateID := candidateIDFromExtensions(extensions)
+
 	// this code is ugly because we can't break backwards compatibility
 	// with the old way of parsing candidates
 	switch typ {
 	case "host":
 		candidate, err := NewCandidateHost(&CandidateHostConfig{
-			"",
+			candidateID,
 			protocol,
 			address,
 			port,
@@ -815,7 +818,7 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 		return candidate, nil
 	case "srflx":
 		candidate, err := NewCandidateServerReflexive(&CandidateServerReflexiveConfig{
-			"",
+			candidateID,
 			protocol,
 			address,
 			port,
@@ -834,7 +837,7 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 		return candidate, nil
 	case "prflx":
 		candidate, err := NewCandidatePeerReflexive(&CandidatePeerReflexiveConfig{
-			"",
+			candidateID,
 			protocol,
 			address,
 			port,
@@ -853,7 +856,7 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 		return candidate, nil
 	case "relay":
 		candidate, err := NewCandidateRelay(&CandidateRelayConfig{
-			"",
+			candidateID,
 			protocol,
 			address,
 			port,
