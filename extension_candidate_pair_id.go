@@ -1,14 +1,21 @@
 package ice
 
+import (
+	"fmt"
+	"strings"
+)
+
 const (
 	// used in RDP for candidate ID extension
 	extensionKeyCandidateID = "cid"
+
+	candidateIDPrefix = "candidate:"
 )
 
 func candidateIDFromExtensions(extensions []CandidateExtension) string {
 	for _, ext := range extensions {
 		if ext.Key == extensionKeyCandidateID {
-			return ext.Value
+			return fmt.Sprintf("candidate:%s", ext.Value)
 		}
 	}
 
@@ -18,6 +25,6 @@ func candidateIDFromExtensions(extensions []CandidateExtension) string {
 func newCandidateIDExtension(candidateID string) CandidateExtension {
 	return CandidateExtension{
 		Key:   extensionKeyCandidateID,
-		Value: candidateID,
+		Value: strings.TrimPrefix(candidateID, candidateIDPrefix),
 	}
 }
