@@ -7,17 +7,18 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3"
 	"github.com/pion/transport/v3/stdnet"
 )
 
-// UDPMux allows multiple connections to go over a single UDP port
+// UDPMux allows multiple connections to go over a single UDP port.
 type UDPMux interface {
 	io.Closer
 	GetConn(ufrag string, addr net.Addr) (net.PacketConn, error)
@@ -25,7 +26,7 @@ type UDPMux interface {
 	GetListenAddresses() []net.Addr
 }
 
-// UDPMuxDefault is an implementation of the interface
+// UDPMuxDefault is an implementation of the interface.
 type UDPMuxDefault struct {
 	params UDPMuxParams
 
@@ -36,7 +37,7 @@ type UDPMuxDefault struct {
 	connsIPv4, connsIPv6 map[string]*udpMuxedConn
 
 	addressMapMu sync.RWMutex
-	addressMap   map[string]*udpMuxedConn
+	addressMap   map[ipPort]*udpMuxedConn
 
 	// Buffer pool to recycle buffers for net.UDPAddr encodes/decodes
 	pool *sync.Pool
@@ -47,12 +48,11 @@ type UDPMuxDefault struct {
 	localAddrsForUnspecified []net.Addr
 }
 
-const maxAddrSize = 512
-
 // UDPMuxParams are parameters for UDPMux.
 type UDPMuxParams struct {
-	Logger  logging.LeveledLogger
-	UDPConn net.PacketConn
+	Logger        logging.LeveledLogger
+	UDPConn       net.PacketConn
+	UDPConnString string
 
 	// Required for gathering local addresses
 	// in case a un UDPConn is passed which does not
@@ -60,26 +60,26 @@ type UDPMuxParams struct {
 	Net transport.Net
 }
 
-// NewUDPMuxDefault creates an implementation of UDPMux
-func NewUDPMuxDefault(params UDPMuxParams) *UDPMuxDefault {
+// NewUDPMuxDefault creates an implementation of UDPMux.
+func NewUDPMuxDefault(params UDPMuxParams) *UDPMuxDefault { //nolint:cyclop
 	if params.Logger == nil {
 		params.Logger = logging.NewDefaultLoggerFactory().NewLogger("ice")
 	}
 
 	var localAddrsForUnspecified []net.Addr
-	if addr, ok := params.UDPConn.LocalAddr().(*net.UDPAddr); !ok {
+	if udpAddr, ok := params.UDPConn.LocalAddr().(*net.UDPAddr); !ok { //nolint:nestif
 		params.Logger.Errorf("LocalAddr is not a net.UDPAddr, got %T", params.UDPConn.LocalAddr())
-	} else if ok && addr.IP.IsUnspecified() {
+	} else if ok && udpAddr.IP.IsUnspecified() {
 		// For unspecified addresses, the correct behavior is to return errListenUnspecified, but
 		// it will break the applications that are already using unspecified UDP connection
 		// with UDPMuxDefault, so print a warn log and create a local address list for mux.
 		params.Logger.Warn("UDPMuxDefault should not listening on unspecified address, use NewMultiUDPMuxFromPort instead")
 		var networks []NetworkType
 		switch {
-		case addr.IP.To4() != nil:
+		case udpAddr.IP.To4() != nil:
 			networks = []NetworkType{NetworkTypeUDP4}
 
-		case addr.IP.To16() != nil:
+		case udpAddr.IP.To16() != nil:
 			networks = []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6}
 
 		default:
@@ -93,43 +93,49 @@ func NewUDPMuxDefault(params UDPMuxParams) *UDPMuxDefault {
 				}
 			}
 
-			ips, err := localInterfaces(params.Net, nil, nil, networks, true)
+			_, addrs, err := localInterfaces(params.Net, nil, nil, networks, true)
 			if err == nil {
-				for _, ip := range ips {
-					localAddrsForUnspecified = append(localAddrsForUnspecified, &net.UDPAddr{IP: ip, Port: addr.Port})
+				localAddrsForUnspecified = make([]net.Addr, len(addrs))
+				for i, addr := range addrs {
+					localAddrsForUnspecified[i] = &net.UDPAddr{
+						IP:   addr.AsSlice(),
+						Port: udpAddr.Port,
+						Zone: addr.Zone(),
+					}
 				}
 			} else {
 				params.Logger.Errorf("Failed to get local interfaces for unspecified addr: %v", err)
 			}
 		}
 	}
+	params.UDPConnString = params.UDPConn.LocalAddr().String()
 
-	m := &UDPMuxDefault{
-		addressMap: map[string]*udpMuxedConn{},
+	mux := &UDPMuxDefault{
+		addressMap: map[ipPort]*udpMuxedConn{},
 		params:     params,
 		connsIPv4:  make(map[string]*udpMuxedConn),
 		connsIPv6:  make(map[string]*udpMuxedConn),
 		closedChan: make(chan struct{}, 1),
 		pool: &sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				// Big enough buffer to fit both packet and address
-				return newBufferHolder(receiveMTU + maxAddrSize)
+				return newBufferHolder(receiveMTU)
 			},
 		},
 		localAddrsForUnspecified: localAddrsForUnspecified,
 	}
 
-	go m.connWorker()
+	go mux.connWorker()
 
-	return m
+	return mux
 }
 
-// LocalAddr returns the listening address of this UDPMuxDefault
+// LocalAddr returns the listening address of this UDPMuxDefault.
 func (m *UDPMuxDefault) LocalAddr() net.Addr {
 	return m.params.UDPConn.LocalAddr()
 }
 
-// GetListenAddresses returns the list of addresses that this mux is listening on
+// GetListenAddresses returns the list of addresses that this mux is listening on.
 func (m *UDPMuxDefault) GetListenAddresses() []net.Addr {
 	if len(m.localAddrsForUnspecified) > 0 {
 		return m.localAddrsForUnspecified
@@ -138,11 +144,11 @@ func (m *UDPMuxDefault) GetListenAddresses() []net.Addr {
 	return []net.Addr{m.LocalAddr()}
 }
 
-// GetConn returns a PacketConn given the connection's ufrag and network address
-// creates the connection if an existing one can't be found
+// GetConn returns a PacketConn given the connection's ufrag and network address.
+// creates the connection if an existing one can't be found.
 func (m *UDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketConn, error) {
 	// don't check addr for mux using unspecified address
-	if len(m.localAddrsForUnspecified) == 0 && m.params.UDPConn.LocalAddr().String() != addr.String() {
+	if len(m.localAddrsForUnspecified) == 0 && m.params.UDPConnString != addr.String() {
 		return nil, errInvalidAddress
 	}
 
@@ -176,11 +182,11 @@ func (m *UDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketConn, er
 	return c, nil
 }
 
-// RemoveConnByUfrag stops and removes the muxed packet connection
+// RemoveConnByUfrag stops and removes the muxed packet connection.
 func (m *UDPMuxDefault) RemoveConnByUfrag(ufrag string) {
 	removedConns := make([]*udpMuxedConn, 0, 2)
 
-	// Keep lock section small to avoid deadlock with conn lock
+	// Keep lock section small to avoid deadlock with conn lock.
 	m.mu.Lock()
 	if c, ok := m.connsIPv4[ufrag]; ok {
 		delete(m.connsIPv4, ufrag)
@@ -193,7 +199,7 @@ func (m *UDPMuxDefault) RemoveConnByUfrag(ufrag string) {
 	m.mu.Unlock()
 
 	if len(removedConns) == 0 {
-		// No need to lock if no connection was found
+		// No need to lock if no connection was found.
 		return
 	}
 
@@ -208,7 +214,7 @@ func (m *UDPMuxDefault) RemoveConnByUfrag(ufrag string) {
 	}
 }
 
-// IsClosed returns true if the mux had been closed
+// IsClosed returns true if the mux had been closed.
 func (m *UDPMuxDefault) IsClosed() bool {
 	select {
 	case <-m.closedChan:
@@ -218,7 +224,7 @@ func (m *UDPMuxDefault) IsClosed() bool {
 	}
 }
 
-// Close the mux, no further connections could be created
+// Close the mux, no further connections could be created.
 func (m *UDPMuxDefault) Close() error {
 	var err error
 	m.closeOnce.Do(func() {
@@ -239,6 +245,7 @@ func (m *UDPMuxDefault) Close() error {
 
 		_ = m.params.UDPConn.Close()
 	})
+
 	return err
 }
 
@@ -246,7 +253,7 @@ func (m *UDPMuxDefault) writeTo(buf []byte, rAddr net.Addr) (n int, err error) {
 	return m.params.UDPConn.WriteTo(buf, rAddr)
 }
 
-func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr string) {
+func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr ipPort) {
 	if m.IsClosed() {
 		return
 	}
@@ -260,7 +267,7 @@ func (m *UDPMuxDefault) registerConnForAddress(conn *udpMuxedConn, addr string) 
 	}
 	m.addressMap[addr] = conn
 
-	m.params.Logger.Debugf("Registered %s for %s", addr, conn.params.Key)
+	m.params.Logger.Debugf("Registered %s for %s", addr.addr.String(), conn.params.Key)
 }
 
 func (m *UDPMuxDefault) createMuxedConn(key string) *udpMuxedConn {
@@ -271,10 +278,11 @@ func (m *UDPMuxDefault) createMuxedConn(key string) *udpMuxedConn {
 		LocalAddr: m.LocalAddr(),
 		Logger:    m.params.Logger,
 	})
+
 	return c
 }
 
-func (m *UDPMuxDefault) connWorker() {
+func (m *UDPMuxDefault) connWorker() { //nolint:cyclop
 	logger := m.params.Logger
 
 	defer func() {
@@ -296,15 +304,22 @@ func (m *UDPMuxDefault) connWorker() {
 			return
 		}
 
-		udpAddr, ok := addr.(*net.UDPAddr)
+		netUDPAddr, ok := addr.(*net.UDPAddr)
 		if !ok {
 			logger.Errorf("Underlying PacketConn did not return a UDPAddr")
+
+			return
+		}
+		udpAddr, err := newIPPort(netUDPAddr.IP, netUDPAddr.Zone, uint16(netUDPAddr.Port)) //nolint:gosec
+		if err != nil {
+			logger.Errorf("Failed to create a new IP/Port host pair")
+
 			return
 		}
 
 		// If we have already seen this address dispatch to the appropriate destination
 		m.addressMapMu.Lock()
-		destinationConn := m.addressMap[addr.String()]
+		destinationConn := m.addressMap[udpAddr]
 		m.addressMapMu.Unlock()
 
 		// If we haven't seen this address before but is a STUN packet lookup by ufrag
@@ -315,17 +330,19 @@ func (m *UDPMuxDefault) connWorker() {
 
 			if err = msg.Decode(); err != nil {
 				m.params.Logger.Warnf("Failed to handle decode ICE from %s: %v", addr.String(), err)
+
 				continue
 			}
 
 			attr, stunAttrErr := msg.Get(stun.AttrUsername)
 			if stunAttrErr != nil {
 				m.params.Logger.Warnf("No Username attribute in STUN message from %s", addr.String())
+
 				continue
 			}
 
 			ufrag := strings.Split(string(attr), ":")[0]
-			isIPv6 := udpAddr.IP.To4() == nil
+			isIPv6 := netUDPAddr.IP.To4() == nil
 
 			m.mu.Lock()
 			destinationConn, _ = m.getConn(ufrag, isIPv6)
@@ -333,11 +350,12 @@ func (m *UDPMuxDefault) connWorker() {
 		}
 
 		if destinationConn == nil {
-			m.params.Logger.Tracef("Dropping packet from %s, addr: %s", udpAddr.String(), addr.String())
+			m.params.Logger.Tracef("Dropping packet from %s, addr: %s", udpAddr.addr, addr)
+
 			continue
 		}
 
-		if err = destinationConn.writePacket(buf[:n], udpAddr); err != nil {
+		if err = destinationConn.writePacket(buf[:n], netUDPAddr); err != nil {
 			m.params.Logger.Errorf("Failed to write packet: %v", err)
 		}
 	}
@@ -349,15 +367,43 @@ func (m *UDPMuxDefault) getConn(ufrag string, isIPv6 bool) (val *udpMuxedConn, o
 	} else {
 		val, ok = m.connsIPv4[ufrag]
 	}
+
 	return
 }
 
 type bufferHolder struct {
-	buf []byte
+	next *bufferHolder
+	buf  []byte
+	addr *net.UDPAddr
 }
 
 func newBufferHolder(size int) *bufferHolder {
 	return &bufferHolder{
 		buf: make([]byte, size),
 	}
+}
+
+func (b *bufferHolder) reset() {
+	b.next = nil
+	b.addr = nil
+}
+
+type ipPort struct {
+	addr netip.Addr
+	port uint16
+}
+
+// newIPPort create a custom type of address based on netip.Addr and
+// port. The underlying ip address passed is converted to IPv6 format
+// to simplify ip address handling.
+func newIPPort(ip net.IP, zone string, port uint16) (ipPort, error) {
+	n, ok := netip.AddrFromSlice(ip.To16())
+	if !ok {
+		return ipPort{}, errInvalidIPAddress
+	}
+
+	return ipPort{
+		addr: n.WithZone(zone),
+		port: port,
+	}, nil
 }

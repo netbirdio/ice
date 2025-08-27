@@ -8,19 +8,17 @@ package ice
 
 import (
 	"context"
-	"errors"
 	"net"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pion/ice/v3/internal/fakenet"
+	"github.com/pion/ice/v4/internal/fakenet"
 	"github.com/pion/logging"
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
 	"github.com/pion/transport/v3/vnet"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,31 +32,21 @@ func (ba *BadAddr) String() string {
 	return "yyy"
 }
 
-func runAgentTest(t *testing.T, config *AgentConfig, task func(ctx context.Context, a *Agent)) {
-	a, err := NewAgent(config)
-	if err != nil {
-		t.Fatalf("Error constructing ice.Agent")
-	}
-
-	if err := a.run(context.Background(), task); err != nil {
-		t.Fatalf("Agent run failure: %v", err)
-	}
-
-	assert.NoError(t, a.Close())
-}
-
-func TestHandlePeerReflexive(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestHandlePeerReflexive(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 2)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 2).Stop()
 
 	t.Run("UDP prflx candidate from handleInbound()", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
-			a.selector = &controllingSelector{agent: a, log: a.log}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
+
+		require.NoError(t, agent.loop.Run(agent.loop, func(_ context.Context) {
+			agent.selector = &controllingSelector{agent: agent, log: agent.log}
 
 			hostConfig := CandidateHostConfig{
 				Network:   "udp",
@@ -68,58 +56,47 @@ func TestHandlePeerReflexive(t *testing.T) {
 			}
 			local, err := NewCandidateHost(&hostConfig)
 			local.conn = &fakenet.MockPacketConn{}
-			if err != nil {
-				t.Fatalf("failed to create a new candidate: %v", err)
-			}
+			require.NoError(t, err)
 
 			remote := &net.UDPAddr{IP: net.ParseIP("172.17.0.3"), Port: 999}
 
 			msg, err := stun.Build(stun.BindingRequest, stun.TransactionID,
-				stun.NewUsername(a.localUfrag+":"+a.remoteUfrag),
+				stun.NewUsername(agent.localUfrag+":"+agent.remoteUfrag),
 				UseCandidate(),
-				AttrControlling(a.tieBreaker),
+				AttrControlling(agent.tieBreaker),
 				PriorityAttr(local.Priority()),
-				stun.NewShortTermIntegrity(a.localPwd),
+				stun.NewShortTermIntegrity(agent.localPwd),
 				stun.Fingerprint,
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
-			a.handleInbound(msg, local, remote)
+			agent.handleInbound(msg, local, remote)
 
 			// Length of remote candidate list must be one now
-			if len(a.remoteCandidates) != 1 {
-				t.Fatal("failed to add a network type to the remote candidate list")
-			}
+			require.Len(t, agent.remoteCandidates, 1)
 
 			// Length of remote candidate list for a network type must be 1
-			set := a.remoteCandidates[local.NetworkType()]
-			if len(set) != 1 {
-				t.Fatal("failed to add prflx candidate to remote candidate list")
-			}
+			set := agent.remoteCandidates[local.NetworkType()]
+			require.Len(t, set, 1)
 
 			c := set[0]
 
-			if c.Type() != CandidateTypePeerReflexive {
-				t.Fatal("candidate type must be prflx")
-			}
-
-			if c.Address() != "172.17.0.3" {
-				t.Fatal("IP address mismatch")
-			}
-
-			if c.Port() != 999 {
-				t.Fatal("Port number mismatch")
-			}
-		})
+			require.Equal(t, CandidateTypePeerReflexive, c.Type())
+			require.Equal(t, "172.17.0.3", c.Address())
+			require.Equal(t, 999, c.Port())
+		}))
 	})
 
 	t.Run("Bad network type with handleInbound()", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
-			a.selector = &controllingSelector{agent: a, log: a.log}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
+
+		require.NoError(t, agent.loop.Run(agent.loop, func(_ context.Context) {
+			agent.selector = &controllingSelector{agent: agent, log: agent.log}
 
 			hostConfig := CandidateHostConfig{
 				Network:   "tcp",
@@ -128,28 +105,28 @@ func TestHandlePeerReflexive(t *testing.T) {
 				Component: 1,
 			}
 			local, err := NewCandidateHost(&hostConfig)
-			if err != nil {
-				t.Fatalf("failed to create a new candidate: %v", err)
-			}
+			require.NoError(t, err)
 
 			remote := &BadAddr{}
 
 			// nolint: contextcheck
-			a.handleInbound(nil, local, remote)
-
-			if len(a.remoteCandidates) != 0 {
-				t.Fatal("bad address should not be added to the remote candidate list")
-			}
-		})
+			agent.handleInbound(nil, local, remote)
+			require.Len(t, agent.remoteCandidates, 0)
+		}))
 	})
 
 	t.Run("Success from unknown remote, prflx candidate MUST only be created via Binding Request", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
-			a.selector = &controllingSelector{agent: a, log: a.log}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
+
+		require.NoError(t, agent.loop.Run(agent.loop, func(_ context.Context) {
+			agent.selector = &controllingSelector{agent: agent, log: agent.log}
 			tID := [stun.TransactionIDSize]byte{}
 			copy(tID[:], "ABC")
-			a.pendingBindingRequests = []bindingRequest{
+			agent.pendingBindingRequests = []bindingRequest{
 				{time.Now(), tID, &net.UDPAddr{}, false},
 			}
 
@@ -161,57 +138,49 @@ func TestHandlePeerReflexive(t *testing.T) {
 			}
 			local, err := NewCandidateHost(&hostConfig)
 			local.conn = &fakenet.MockPacketConn{}
-			if err != nil {
-				t.Fatalf("failed to create a new candidate: %v", err)
-			}
+			require.NoError(t, err)
 
 			remote := &net.UDPAddr{IP: net.ParseIP("172.17.0.3"), Port: 999}
 			msg, err := stun.Build(stun.BindingSuccess, stun.NewTransactionIDSetter(tID),
-				stun.NewShortTermIntegrity(a.remotePwd),
+				stun.NewShortTermIntegrity(agent.remotePwd),
 				stun.Fingerprint,
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
-			a.handleInbound(msg, local, remote)
-			if len(a.remoteCandidates) != 0 {
-				t.Fatal("unknown remote was able to create a candidate")
-			}
-		})
+			agent.handleInbound(msg, local, remote)
+			require.Len(t, agent.remoteCandidates, 0)
+		}))
 	})
 }
 
 // Assert that Agent on startup sends message, and doesn't wait for connectivityTicker to fire
 // https://github.com/pion/ice/issues/15
 func TestConnectivityOnStartup(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	// Create a network with two interfaces
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	aNotifier, aConnected := onConnected()
 	bNotifier, bConnected := onConnected()
@@ -227,6 +196,9 @@ func TestConnectivityOnStartup(t *testing.T) {
 
 	aAgent, err := NewAgent(cfg0)
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	cfg1 := &AgentConfig{
@@ -239,17 +211,20 @@ func TestConnectivityOnStartup(t *testing.T) {
 
 	bAgent, err := NewAgent(cfg1)
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	aConn, bConn := func(aAgent, bAgent *Agent) (*Conn, *Conn) {
+	func(aAgent, bAgent *Agent) (*Conn, *Conn) {
 		// Manual signaling
 		aUfrag, aPwd, err := aAgent.GetLocalUserCredentials()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		bUfrag, bPwd, err := bAgent.GetLocalUserCredentials()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		gatherAndExchangeCandidates(aAgent, bAgent)
+		gatherAndExchangeCandidates(t, aAgent, bAgent)
 
 		accepted := make(chan struct{})
 		accepting := make(chan struct{})
@@ -257,9 +232,9 @@ func TestConnectivityOnStartup(t *testing.T) {
 
 		origHdlr := aAgent.onConnectionStateChangeHdlr.Load()
 		if origHdlr != nil {
-			defer check(aAgent.OnConnectionStateChange(origHdlr.(func(ConnectionState)))) //nolint:forcetypeassert
+			defer require.NoError(t, aAgent.OnConnectionStateChange(origHdlr.(func(ConnectionState)))) //nolint:forcetypeassert
 		}
-		check(aAgent.OnConnectionStateChange(func(s ConnectionState) {
+		require.NoError(t, aAgent.OnConnectionStateChange(func(s ConnectionState) {
 			if s == ConnectionStateChecking {
 				close(accepting)
 			}
@@ -271,17 +246,18 @@ func TestConnectivityOnStartup(t *testing.T) {
 		go func() {
 			var acceptErr error
 			aConn, acceptErr = aAgent.Accept(context.TODO(), bUfrag, bPwd)
-			check(acceptErr)
+			require.NoError(t, acceptErr)
 			close(accepted)
 		}()
 
 		<-accepting
 
 		bConn, err := bAgent.Dial(context.TODO(), aUfrag, aPwd)
-		check(err)
+		require.NoError(t, err)
 
 		// Ensure accepted
 		<-accepted
+
 		return aConn, bConn
 	}(aAgent, bAgent)
 
@@ -290,18 +266,13 @@ func TestConnectivityOnStartup(t *testing.T) {
 	<-aConnected
 	<-bConnected
 
-	assert.NoError(t, wan.Stop())
-	if !closePipe(t, aConn, bConn) {
-		return
-	}
+	require.NoError(t, wan.Stop())
 }
 
 func TestConnectivityLite(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	stunServerURL := &stun.URI{
 		Scheme: SchemeTypeSTUN,
@@ -314,9 +285,9 @@ func TestConnectivityLite(t *testing.T) {
 		MappingBehavior:   vnet.EndpointIndependent,
 		FilteringBehavior: vnet.EndpointIndependent,
 	}
-	v, err := buildVNet(natType, natType)
+	vent, err := buildVNet(natType, natType)
 	require.NoError(t, err, "should succeed")
-	defer v.close()
+	defer vent.close()
 
 	aNotifier, aConnected := onConnected()
 	bNotifier, bConnected := onConnected()
@@ -325,11 +296,14 @@ func TestConnectivityLite(t *testing.T) {
 		Urls:             []*stun.URI{stunServerURL},
 		NetworkTypes:     supportedNetworkTypes(),
 		MulticastDNSMode: MulticastDNSModeDisabled,
-		Net:              v.net0,
+		Net:              vent.net0,
 	}
 
 	aAgent, err := NewAgent(cfg0)
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	cfg1 := &AgentConfig{
@@ -338,28 +312,26 @@ func TestConnectivityLite(t *testing.T) {
 		CandidateTypes:   []CandidateType{CandidateTypeHost},
 		NetworkTypes:     supportedNetworkTypes(),
 		MulticastDNSMode: MulticastDNSModeDisabled,
-		Net:              v.net1,
+		Net:              vent.net1,
 	}
 
 	bAgent, err := NewAgent(cfg1)
 	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	aConn, bConn := connectWithVNet(aAgent, bAgent)
+	connectWithVNet(t, aAgent, bAgent)
 
 	// Ensure pair selected
 	// Note: this assumes ConnectionStateConnected is thrown after selecting the final pair
 	<-aConnected
 	<-bConnected
-
-	if !closePipe(t, aConn, bConn) {
-		return
-	}
 }
 
-func TestInboundValidity(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestInboundValidity(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
 	buildMsg := func(class stun.MessageClass, username, key string) *stun.Message {
 		msg, err := stun.Build(stun.NewType(stun.MethodBinding, class), stun.TransactionID,
@@ -367,9 +339,7 @@ func TestInboundValidity(t *testing.T) {
 			stun.NewShortTermIntegrity(key),
 			stun.Fingerprint,
 		)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		return msg
 	}
@@ -383,101 +353,88 @@ func TestInboundValidity(t *testing.T) {
 	}
 	local, err := NewCandidateHost(&hostConfig)
 	local.conn = &fakenet.MockPacketConn{}
-	if err != nil {
-		t.Fatalf("failed to create a new candidate: %v", err)
-	}
+	require.NoError(t, err)
 
 	t.Run("Invalid Binding requests should be discarded", func(t *testing.T) {
-		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
 
-		a.handleInbound(buildMsg(stun.ClassRequest, "invalid", a.localPwd), local, remote)
-		if len(a.remoteCandidates) == 1 {
-			t.Fatal("Binding with invalid Username was able to create prflx candidate")
-		}
+		agent.handleInbound(buildMsg(stun.ClassRequest, "invalid", agent.localPwd), local, remote)
+		require.Len(t, agent.remoteCandidates, 0)
 
-		a.handleInbound(buildMsg(stun.ClassRequest, a.localUfrag+":"+a.remoteUfrag, "Invalid"), local, remote)
-		if len(a.remoteCandidates) == 1 {
-			t.Fatal("Binding with invalid MessageIntegrity was able to create prflx candidate")
-		}
-
-		assert.NoError(t, a.Close())
+		agent.handleInbound(buildMsg(stun.ClassRequest, agent.localUfrag+":"+agent.remoteUfrag, "Invalid"), local, remote)
+		require.Len(t, agent.remoteCandidates, 0)
 	})
 
 	t.Run("Invalid Binding success responses should be discarded", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, a.Close())
+		}()
 
 		a.handleInbound(buildMsg(stun.ClassSuccessResponse, a.localUfrag+":"+a.remoteUfrag, "Invalid"), local, remote)
-		if len(a.remoteCandidates) == 1 {
-			t.Fatal("Binding with invalid MessageIntegrity was able to create prflx candidate")
-		}
-
-		assert.NoError(t, a.Close())
+		require.Len(t, a.remoteCandidates, 0)
 	})
 
 	t.Run("Discard non-binding messages", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, a.Close())
+		}()
 
 		a.handleInbound(buildMsg(stun.ClassErrorResponse, a.localUfrag+":"+a.remoteUfrag, "Invalid"), local, remote)
-		if len(a.remoteCandidates) == 1 {
-			t.Fatal("non-binding message was able to create prflxRemote")
-		}
-
-		assert.NoError(t, a.Close())
+		require.Len(t, a.remoteCandidates, 0)
 	})
 
 	t.Run("Valid bind request", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, a.Close())
+		}()
 
-		err = a.run(context.Background(), func(ctx context.Context, a *Agent) {
+		err = a.loop.Run(a.loop, func(_ context.Context) {
 			a.selector = &controllingSelector{agent: a, log: a.log}
 			// nolint: contextcheck
 			a.handleInbound(buildMsg(stun.ClassRequest, a.localUfrag+":"+a.remoteUfrag, a.localPwd), local, remote)
-			if len(a.remoteCandidates) != 1 {
-				t.Fatal("Binding with valid values was unable to create prflx candidate")
-			}
+			require.Len(t, a.remoteCandidates, 1)
 		})
 
-		assert.NoError(t, err)
-		assert.NoError(t, a.Close())
+		require.NoError(t, err)
 	})
 
 	t.Run("Valid bind without fingerprint", func(t *testing.T) {
-		var config AgentConfig
-		runAgentTest(t, &config, func(ctx context.Context, a *Agent) {
-			a.selector = &controllingSelector{agent: a, log: a.log}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
+
+		require.NoError(t, agent.loop.Run(agent.loop, func(_ context.Context) {
+			agent.selector = &controllingSelector{agent: agent, log: agent.log}
 			msg, err := stun.Build(stun.BindingRequest, stun.TransactionID,
-				stun.NewUsername(a.localUfrag+":"+a.remoteUfrag),
-				stun.NewShortTermIntegrity(a.localPwd),
+				stun.NewUsername(agent.localUfrag+":"+agent.remoteUfrag),
+				stun.NewShortTermIntegrity(agent.localPwd),
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 
 			// nolint: contextcheck
-			a.handleInbound(msg, local, remote)
-			if len(a.remoteCandidates) != 1 {
-				t.Fatal("Binding with valid values (but no fingerprint) was unable to create prflx candidate")
-			}
-		})
+			agent.handleInbound(msg, local, remote)
+			require.Len(t, agent.remoteCandidates, 1)
+		}))
 	})
 
 	t.Run("Success with invalid TransactionID", func(t *testing.T) {
-		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		agent, err := NewAgent(&AgentConfig{})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, agent.Close())
+		}()
 
 		hostConfig := CandidateHostConfig{
 			Network:   "udp",
@@ -487,65 +444,53 @@ func TestInboundValidity(t *testing.T) {
 		}
 		local, err := NewCandidateHost(&hostConfig)
 		local.conn = &fakenet.MockPacketConn{}
-		if err != nil {
-			t.Fatalf("failed to create a new candidate: %v", err)
-		}
+		require.NoError(t, err)
 
 		remote := &net.UDPAddr{IP: net.ParseIP("172.17.0.3"), Port: 999}
 		tID := [stun.TransactionIDSize]byte{}
 		copy(tID[:], "ABC")
 		msg, err := stun.Build(stun.BindingSuccess, stun.NewTransactionIDSetter(tID),
-			stun.NewShortTermIntegrity(a.remotePwd),
+			stun.NewShortTermIntegrity(agent.remotePwd),
 			stun.Fingerprint,
 		)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		a.handleInbound(msg, local, remote)
-		if len(a.remoteCandidates) != 0 {
-			t.Fatal("unknown remote was able to create a candidate")
-		}
-
-		assert.NoError(t, a.Close())
+		agent.handleInbound(msg, local, remote)
+		require.Len(t, agent.remoteCandidates, 0)
 	})
 }
 
 func TestInvalidAgentStarts(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 
-	if _, err = a.Dial(ctx, "", "bar"); err != nil && !errors.Is(err, ErrRemoteUfragEmpty) {
-		t.Fatal(err)
-	}
+	_, err = agent.Dial(ctx, "", "bar")
+	require.ErrorIs(t, ErrRemoteUfragEmpty, err)
 
-	if _, err = a.Dial(ctx, "foo", ""); err != nil && !errors.Is(err, ErrRemotePwdEmpty) {
-		t.Fatal(err)
-	}
+	_, err = agent.Dial(ctx, "foo", "")
+	require.ErrorIs(t, ErrRemotePwdEmpty, err)
 
-	if _, err = a.Dial(ctx, "foo", "bar"); err != nil && !errors.Is(err, ErrCanceledByCaller) {
-		t.Fatal(err)
-	}
+	_, err = agent.Dial(ctx, "foo", "bar")
+	require.ErrorIs(t, ErrCanceledByCaller, err)
 
-	if _, err = a.Dial(context.TODO(), "foo", "bar"); err != nil && !errors.Is(err, ErrMultipleStart) {
-		t.Fatal(err)
-	}
-
-	assert.NoError(t, a.Close())
+	_, err = agent.Dial(ctx, "foo", "bar")
+	require.ErrorIs(t, ErrMultipleStart, err)
 }
 
-// Assert that Agent emits Connecting/Connected/Disconnected/Failed/Closed messages
-func TestConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+// Assert that Agent emits Connecting/Connected/Disconnected/Failed/Closed messages.
+func TestConnectionStateCallback(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	disconnectedDuration := time.Second
 	failedDuration := time.Second
@@ -557,23 +502,37 @@ func TestConnectionStateCallback(t *testing.T) {
 		DisconnectedTimeout: &disconnectedDuration,
 		FailedTimeout:       &failedDuration,
 		KeepaliveInterval:   &KeepaliveInterval,
+		InterfaceFilter:     problematicNetworkInterfaces,
 	}
+
+	isClosed := make(chan any)
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		select {
+		case <-isClosed:
+			return
+		default:
+		}
+		require.NoError(t, aAgent.Close())
+	}()
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		select {
+		case <-isClosed:
+			return
+		default:
+		}
+		require.NoError(t, bAgent.Close())
+	}()
 
-	isChecking := make(chan interface{})
-	isConnected := make(chan interface{})
-	isDisconnected := make(chan interface{})
-	isFailed := make(chan interface{})
-	isClosed := make(chan interface{})
+	isChecking := make(chan any)
+	isConnected := make(chan any)
+	isDisconnected := make(chan any)
+	isFailed := make(chan any)
 	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		switch c {
 		case ConnectionStateChecking:
@@ -589,19 +548,17 @@ func TestConnectionStateCallback(t *testing.T) {
 		default:
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 
 	<-isChecking
 	<-isConnected
 	<-isDisconnected
 	<-isFailed
 
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, aAgent.Close())
+	require.NoError(t, bAgent.Close())
 
 	<-isClosed
 }
@@ -609,29 +566,27 @@ func TestConnectionStateCallback(t *testing.T) {
 func TestInvalidGather(t *testing.T) {
 	t.Run("Gather with no OnCandidate should error", func(t *testing.T) {
 		a, err := NewAgent(&AgentConfig{})
-		if err != nil {
-			t.Fatalf("Error constructing ice.Agent")
-		}
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, a.Close())
+		}()
 
 		err = a.GatherCandidates()
-		if !errors.Is(err, ErrNoOnCandidateHandler) {
-			t.Fatal("trickle GatherCandidates succeeded without OnCandidate")
-		}
-		assert.NoError(t, a.Close())
+		require.ErrorIs(t, ErrNoOnCandidateHandler, err)
 	})
 }
 
-func TestCandidatePairStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestCandidatePairsStats(t *testing.T) { //nolint:cyclop,gocyclo
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
 
-	a, err := NewAgent(&AgentConfig{})
-	if err != nil {
-		t.Fatalf("Failed to create agent: %s", err)
-	}
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	hostConfig := &CandidateHostConfig{
 		Network:   "udp",
@@ -640,9 +595,7 @@ func TestCandidatePairStats(t *testing.T) {
 		Component: 1,
 	}
 	hostLocal, err := NewCandidateHost(hostConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct local host candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	relayConfig := &CandidateRelayConfig{
 		Network:   "udp",
@@ -653,9 +606,7 @@ func TestCandidatePairStats(t *testing.T) {
 		RelPort:   43210,
 	}
 	relayRemote, err := NewCandidateRelay(relayConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote relay candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	srflxConfig := &CandidateServerReflexiveConfig{
 		Network:   "udp",
@@ -666,9 +617,7 @@ func TestCandidatePairStats(t *testing.T) {
 		RelPort:   43212,
 	}
 	srflxRemote, err := NewCandidateServerReflexive(srflxConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote srflx candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	prflxConfig := &CandidatePeerReflexiveConfig{
 		Network:   "udp",
@@ -679,9 +628,7 @@ func TestCandidatePairStats(t *testing.T) {
 		RelPort:   43211,
 	}
 	prflxRemote, err := NewCandidatePeerReflexive(prflxConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote prflx candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	hostConfig = &CandidateHostConfig{
 		Network:   "udp",
@@ -690,32 +637,34 @@ func TestCandidatePairStats(t *testing.T) {
 		Component: 1,
 	}
 	hostRemote, err := NewCandidateHost(hostConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote host candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	for _, remote := range []Candidate{relayRemote, srflxRemote, prflxRemote, hostRemote} {
-		p := a.findPair(hostLocal, remote)
+		p := agent.findPair(hostLocal, remote)
 
 		if p == nil {
-			a.addPair(hostLocal, remote)
+			p = agent.addPair(hostLocal, remote)
 		}
+		p.UpdateRequestReceived()
+		p.UpdateRequestSent()
+		p.UpdateResponseSent()
+		p.UpdateRoundTripTime(time.Second)
 	}
 
-	p := a.findPair(hostLocal, prflxRemote)
+	p := agent.findPair(hostLocal, prflxRemote)
 	p.state = CandidatePairStateFailed
 
-	stats := a.GetCandidatePairsStats()
-	if len(stats) != 4 {
-		t.Fatal("expected 4 candidate pairs stats")
+	for i := 1; i < 10; i++ {
+		p.UpdateRoundTripTime(time.Duration(i+1) * time.Second)
 	}
+
+	stats := agent.GetCandidatePairsStats()
+	require.Len(t, stats, 4)
 
 	var relayPairStat, srflxPairStat, prflxPairStat, hostPairStat CandidatePairStats
 
 	for _, cps := range stats {
-		if cps.LocalCandidateID != hostLocal.ID() {
-			t.Fatal("invalid local candidate id")
-		}
+		require.Equal(t, cps.LocalCandidateID, hostLocal.ID())
 		switch cps.RemoteCandidateID {
 		case relayRemote.ID():
 			relayPairStat = cps
@@ -726,45 +675,43 @@ func TestCandidatePairStats(t *testing.T) {
 		case hostRemote.ID():
 			hostPairStat = cps
 		default:
-			t.Fatal("invalid remote candidate ID")
+			t.Fatal("invalid remote candidate ID") //nolint
 		}
+
+		require.False(t, cps.FirstRequestTimestamp.IsZero())
+		require.False(t, cps.LastRequestTimestamp.IsZero())
+		require.False(t, cps.FirstResponseTimestamp.IsZero())
+		require.False(t, cps.LastResponseTimestamp.IsZero())
+		require.False(t, cps.FirstRequestReceivedTimestamp.IsZero())
+		require.False(t, cps.LastRequestReceivedTimestamp.IsZero())
+		require.NotZero(t, cps.RequestsReceived)
+		require.NotZero(t, cps.RequestsSent)
+		require.NotZero(t, cps.ResponsesSent)
+		require.NotZero(t, cps.ResponsesReceived)
 	}
 
-	if relayPairStat.RemoteCandidateID != relayRemote.ID() {
-		t.Fatal("missing host-relay pair stat")
-	}
+	require.Equal(t, relayPairStat.RemoteCandidateID, relayRemote.ID())
+	require.Equal(t, srflxPairStat.RemoteCandidateID, srflxRemote.ID())
+	require.Equal(t, prflxPairStat.RemoteCandidateID, prflxRemote.ID())
+	require.Equal(t, hostPairStat.RemoteCandidateID, hostRemote.ID())
+	require.Equal(t, prflxPairStat.State, CandidatePairStateFailed)
 
-	if srflxPairStat.RemoteCandidateID != srflxRemote.ID() {
-		t.Fatal("missing host-srflx pair stat")
-	}
-
-	if prflxPairStat.RemoteCandidateID != prflxRemote.ID() {
-		t.Fatal("missing host-prflx pair stat")
-	}
-
-	if hostPairStat.RemoteCandidateID != hostRemote.ID() {
-		t.Fatal("missing host-host pair stat")
-	}
-
-	if prflxPairStat.State != CandidatePairStateFailed {
-		t.Fatalf("expected host-prflx pair to have state failed, it has state %s instead",
-			prflxPairStat.State.String())
-	}
-
-	assert.NoError(t, a.Close())
+	require.Equal(t, float64(10), prflxPairStat.CurrentRoundTripTime)
+	require.Equal(t, float64(55), prflxPairStat.TotalRoundTripTime)
+	require.Equal(t, uint64(10), prflxPairStat.ResponsesReceived)
 }
 
-func TestLocalCandidateStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestSelectedCandidatePairStats(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
 
-	a, err := NewAgent(&AgentConfig{})
-	if err != nil {
-		t.Fatalf("Failed to create agent: %s", err)
-	}
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	hostConfig := &CandidateHostConfig{
 		Network:   "udp",
@@ -773,9 +720,66 @@ func TestLocalCandidateStats(t *testing.T) {
 		Component: 1,
 	}
 	hostLocal, err := NewCandidateHost(hostConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct local host candidate: %s", err)
+	require.NoError(t, err)
+
+	srflxConfig := &CandidateServerReflexiveConfig{
+		Network:   "udp",
+		Address:   "10.10.10.2",
+		Port:      19218,
+		Component: 1,
+		RelAddr:   "4.3.2.1",
+		RelPort:   43212,
 	}
+	srflxRemote, err := NewCandidateServerReflexive(srflxConfig)
+	require.NoError(t, err)
+
+	// no selected pair, should return not available
+	_, ok := agent.GetSelectedCandidatePairStats()
+	require.False(t, ok)
+
+	// add pair and populate some RTT stats
+	p := agent.findPair(hostLocal, srflxRemote)
+	if p == nil {
+		agent.addPair(hostLocal, srflxRemote)
+		p = agent.findPair(hostLocal, srflxRemote)
+	}
+	for i := 0; i < 10; i++ {
+		p.UpdateRoundTripTime(time.Duration(i+1) * time.Second)
+	}
+
+	// set the pair as selected
+	agent.setSelectedPair(p)
+
+	stats, ok := agent.GetSelectedCandidatePairStats()
+	require.True(t, ok)
+
+	require.Equal(t, stats.LocalCandidateID, hostLocal.ID())
+	require.Equal(t, stats.RemoteCandidateID, srflxRemote.ID())
+	require.Equal(t, float64(10), stats.CurrentRoundTripTime)
+	require.Equal(t, float64(55), stats.TotalRoundTripTime)
+	require.Equal(t, uint64(10), stats.ResponsesReceived)
+}
+
+func TestLocalCandidateStats(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
+
+	// Avoid deadlocks?
+	defer test.TimeOut(1 * time.Second).Stop()
+
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
+
+	hostConfig := &CandidateHostConfig{
+		Network:   "udp",
+		Address:   "192.168.1.1",
+		Port:      19216,
+		Component: 1,
+	}
+	hostLocal, err := NewCandidateHost(hostConfig)
+	require.NoError(t, err)
 
 	srflxConfig := &CandidateServerReflexiveConfig{
 		Network:   "udp",
@@ -786,16 +790,12 @@ func TestLocalCandidateStats(t *testing.T) {
 		RelPort:   43212,
 	}
 	srflxLocal, err := NewCandidateServerReflexive(srflxConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct local srflx candidate: %s", err)
-	}
+	require.NoError(t, err)
 
-	a.localCandidates[NetworkTypeUDP4] = []Candidate{hostLocal, srflxLocal}
+	agent.localCandidates[NetworkTypeUDP4] = []Candidate{hostLocal, srflxLocal}
 
-	localStats := a.GetLocalCandidatesStats()
-	if len(localStats) != 2 {
-		t.Fatalf("expected 2 local candidates stats, got %d instead", len(localStats))
-	}
+	localStats := agent.GetLocalCandidatesStats()
+	require.Len(t, localStats, 2)
 
 	var hostLocalStat, srflxLocalStat CandidateStats
 	for _, stats := range localStats {
@@ -808,44 +808,29 @@ func TestLocalCandidateStats(t *testing.T) {
 			srflxLocalStat = stats
 			candidate = srflxLocal
 		default:
-			t.Fatal("invalid local candidate ID")
+			t.Fatal("invalid local candidate ID") // nolint
 		}
 
-		if stats.CandidateType != candidate.Type() {
-			t.Fatal("invalid stats CandidateType")
-		}
-
-		if stats.Priority != candidate.Priority() {
-			t.Fatal("invalid stats CandidateType")
-		}
-
-		if stats.IP != candidate.Address() {
-			t.Fatal("invalid stats IP")
-		}
+		require.Equal(t, stats.CandidateType, candidate.Type())
+		require.Equal(t, stats.Priority, candidate.Priority())
+		require.Equal(t, stats.IP, candidate.Address())
 	}
 
-	if hostLocalStat.ID != hostLocal.ID() {
-		t.Fatal("missing host local stat")
-	}
-
-	if srflxLocalStat.ID != srflxLocal.ID() {
-		t.Fatal("missing srflx local stat")
-	}
-
-	assert.NoError(t, a.Close())
+	require.Equal(t, hostLocalStat.ID, hostLocal.ID())
+	require.Equal(t, srflxLocalStat.ID, srflxLocal.ID())
 }
 
-func TestRemoteCandidateStats(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestRemoteCandidateStats(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
 	// Avoid deadlocks?
 	defer test.TimeOut(1 * time.Second).Stop()
 
-	a, err := NewAgent(&AgentConfig{})
-	if err != nil {
-		t.Fatalf("Failed to create agent: %s", err)
-	}
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	relayConfig := &CandidateRelayConfig{
 		Network:   "udp",
@@ -856,9 +841,7 @@ func TestRemoteCandidateStats(t *testing.T) {
 		RelPort:   43210,
 	}
 	relayRemote, err := NewCandidateRelay(relayConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote relay candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	srflxConfig := &CandidateServerReflexiveConfig{
 		Network:   "udp",
@@ -869,9 +852,7 @@ func TestRemoteCandidateStats(t *testing.T) {
 		RelPort:   43212,
 	}
 	srflxRemote, err := NewCandidateServerReflexive(srflxConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote srflx candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	prflxConfig := &CandidatePeerReflexiveConfig{
 		Network:   "udp",
@@ -882,9 +863,7 @@ func TestRemoteCandidateStats(t *testing.T) {
 		RelPort:   43211,
 	}
 	prflxRemote, err := NewCandidatePeerReflexive(prflxConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote prflx candidate: %s", err)
-	}
+	require.NoError(t, err)
 
 	hostConfig := &CandidateHostConfig{
 		Network:   "udp",
@@ -893,16 +872,12 @@ func TestRemoteCandidateStats(t *testing.T) {
 		Component: 1,
 	}
 	hostRemote, err := NewCandidateHost(hostConfig)
-	if err != nil {
-		t.Fatalf("Failed to construct remote host candidate: %s", err)
-	}
+	require.NoError(t, err)
 
-	a.remoteCandidates[NetworkTypeUDP4] = []Candidate{relayRemote, srflxRemote, prflxRemote, hostRemote}
+	agent.remoteCandidates[NetworkTypeUDP4] = []Candidate{relayRemote, srflxRemote, prflxRemote, hostRemote}
 
-	remoteStats := a.GetRemoteCandidatesStats()
-	if len(remoteStats) != 4 {
-		t.Fatalf("expected 4 remote candidates stats, got %d instead", len(remoteStats))
-	}
+	remoteStats := agent.GetRemoteCandidatesStats()
+	require.Len(t, remoteStats, 4)
 	var relayRemoteStat, srflxRemoteStat, prflxRemoteStat, hostRemoteStat CandidateStats
 	for _, stats := range remoteStats {
 		var candidate Candidate
@@ -920,67 +895,37 @@ func TestRemoteCandidateStats(t *testing.T) {
 			hostRemoteStat = stats
 			candidate = hostRemote
 		default:
-			t.Fatal("invalid remote candidate ID")
+			t.Fatal("invalid remote candidate ID") // nolint
 		}
 
-		if stats.CandidateType != candidate.Type() {
-			t.Fatal("invalid stats CandidateType")
-		}
-
-		if stats.Priority != candidate.Priority() {
-			t.Fatal("invalid stats CandidateType")
-		}
-
-		if stats.IP != candidate.Address() {
-			t.Fatal("invalid stats IP")
-		}
+		require.Equal(t, stats.CandidateType, candidate.Type())
+		require.Equal(t, stats.Priority, candidate.Priority())
+		require.Equal(t, stats.IP, candidate.Address())
 	}
 
-	if relayRemoteStat.ID != relayRemote.ID() {
-		t.Fatal("missing relay remote stat")
-	}
-
-	if srflxRemoteStat.ID != srflxRemote.ID() {
-		t.Fatal("missing srflx remote stat")
-	}
-
-	if prflxRemoteStat.ID != prflxRemote.ID() {
-		t.Fatal("missing prflx remote stat")
-	}
-
-	if hostRemoteStat.ID != hostRemote.ID() {
-		t.Fatal("missing host remote stat")
-	}
-
-	assert.NoError(t, a.Close())
+	require.Equal(t, relayRemoteStat.ID, relayRemote.ID())
+	require.Equal(t, srflxRemoteStat.ID, srflxRemote.ID())
+	require.Equal(t, prflxRemoteStat.ID, prflxRemote.ID())
+	require.Equal(t, hostRemoteStat.ID, hostRemote.ID())
 }
 
 func TestInitExtIPMapping(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	// a.extIPMapper should be nil by default
-	a, err := NewAgent(&AgentConfig{})
-	if err != nil {
-		t.Fatalf("Failed to create agent: %v", err)
-	}
-	if a.extIPMapper != nil {
-		t.Fatal("a.extIPMapper should be nil by default")
-	}
-	assert.NoError(t, a.Close())
+	// agent.extIPMapper should be nil by default
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	require.Nil(t, agent.extIPMapper)
+	require.NoError(t, agent.Close())
 
 	// a.extIPMapper should be nil when NAT1To1IPs is a non-nil empty array
-	a, err = NewAgent(&AgentConfig{
+	agent, err = NewAgent(&AgentConfig{
 		NAT1To1IPs:             []string{},
 		NAT1To1IPCandidateType: CandidateTypeHost,
 	})
-	if err != nil {
-		t.Fatalf("Failed to create agent: %v", err)
-	}
-	if a.extIPMapper != nil {
-		t.Fatal("a.extIPMapper should be nil by default")
-	}
-	assert.NoError(t, a.Close())
+	require.NoError(t, err)
+	require.Nil(t, agent.extIPMapper)
+	require.NoError(t, agent.Close())
 
 	// NewAgent should return an error when 1:1 NAT for host candidate is enabled
 	// but the candidate type does not appear in the CandidateTypes.
@@ -989,9 +934,7 @@ func TestInitExtIPMapping(t *testing.T) {
 		NAT1To1IPCandidateType: CandidateTypeHost,
 		CandidateTypes:         []CandidateType{CandidateTypeRelay},
 	})
-	if !errors.Is(err, ErrIneffectiveNAT1To1IPMappingHost) {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	require.ErrorIs(t, ErrIneffectiveNAT1To1IPMappingHost, err)
 
 	// NewAgent should return an error when 1:1 NAT for srflx candidate is enabled
 	// but the candidate type does not appear in the CandidateTypes.
@@ -1000,9 +943,7 @@ func TestInitExtIPMapping(t *testing.T) {
 		NAT1To1IPCandidateType: CandidateTypeServerReflexive,
 		CandidateTypes:         []CandidateType{CandidateTypeRelay},
 	})
-	if !errors.Is(err, ErrIneffectiveNAT1To1IPMappingSrflx) {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	require.ErrorIs(t, ErrIneffectiveNAT1To1IPMappingSrflx, err)
 
 	// NewAgent should return an error when 1:1 NAT for host candidate is enabled
 	// along with mDNS with MulticastDNSModeQueryAndGather
@@ -1011,53 +952,55 @@ func TestInitExtIPMapping(t *testing.T) {
 		NAT1To1IPCandidateType: CandidateTypeHost,
 		MulticastDNSMode:       MulticastDNSModeQueryAndGather,
 	})
-	if !errors.Is(err, ErrMulticastDNSWithNAT1To1IPMapping) {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	require.ErrorIs(t, ErrMulticastDNSWithNAT1To1IPMapping, err)
 
 	// NewAgent should return if newExternalIPMapper() returns an error.
 	_, err = NewAgent(&AgentConfig{
 		NAT1To1IPs:             []string{"bad.2.3.4"}, // Bad IP
 		NAT1To1IPCandidateType: CandidateTypeHost,
 	})
-	if !errors.Is(err, ErrInvalidNAT1To1IPMapping) {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	require.ErrorIs(t, ErrInvalidNAT1To1IPMapping, err)
 }
 
 func TestBindingRequestTimeout(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	const expectedRemovalCount = 2
 
-	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	now := time.Now()
-	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
+	agent.pendingBindingRequests = append(agent.pendingBindingRequests, bindingRequest{
 		timestamp: now, // Valid
 	})
-	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
+	agent.pendingBindingRequests = append(agent.pendingBindingRequests, bindingRequest{
 		timestamp: now.Add(-3900 * time.Millisecond), // Valid
 	})
-	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
+	agent.pendingBindingRequests = append(agent.pendingBindingRequests, bindingRequest{
 		timestamp: now.Add(-4100 * time.Millisecond), // Invalid
 	})
-	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
+	agent.pendingBindingRequests = append(agent.pendingBindingRequests, bindingRequest{
 		timestamp: now.Add(-75 * time.Hour), // Invalid
 	})
 
-	a.invalidatePendingBindingRequests(now)
-	assert.Equal(t, expectedRemovalCount, len(a.pendingBindingRequests), "Binding invalidation due to timeout did not remove the correct number of binding requests")
-	assert.NoError(t, a.Close())
+	agent.invalidatePendingBindingRequests(now)
+
+	require.Equal(
+		t,
+		expectedRemovalCount,
+		len(agent.pendingBindingRequests),
+		"Binding invalidation due to timeout did not remove the correct number of binding requests",
+	)
 }
 
 // TestAgentCredentials checks if local username fragments and passwords (if set) meet RFC standard
-// and ensure it's backwards compatible with previous versions of the pion/ice
+// and ensure it's backwards compatible with previous versions of the pion/ice.
 func TestAgentCredentials(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	// Make sure to pass Travis check by disabling the logs
 	log := logging.NewDefaultLoggerFactory()
@@ -1067,10 +1010,12 @@ func TestAgentCredentials(t *testing.T) {
 	// If set, they should follow the default 16/128 bits random number generator strategy
 
 	agent, err := NewAgent(&AgentConfig{LoggerFactory: log})
-	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, len([]rune(agent.localUfrag))*8, 24)
-	assert.GreaterOrEqual(t, len([]rune(agent.localPwd))*8, 128)
-	assert.NoError(t, agent.Close())
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
+	require.GreaterOrEqual(t, len([]rune(agent.localUfrag))*8, 24)
+	require.GreaterOrEqual(t, len([]rune(agent.localPwd))*8, 128)
 
 	// Should honor RFC standards
 	// Local values MUST be unguessable, with at least 128 bits of
@@ -1078,20 +1023,18 @@ func TestAgentCredentials(t *testing.T) {
 	// at least 24 bits of output to generate the username fragment.
 
 	_, err = NewAgent(&AgentConfig{LocalUfrag: "xx", LoggerFactory: log})
-	assert.EqualError(t, err, ErrLocalUfragInsufficientBits.Error())
+	require.EqualError(t, err, ErrLocalUfragInsufficientBits.Error())
 
 	_, err = NewAgent(&AgentConfig{LocalPwd: "xxxxxx", LoggerFactory: log})
-	assert.EqualError(t, err, ErrLocalPwdInsufficientBits.Error())
+	require.EqualError(t, err, ErrLocalPwdInsufficientBits.Error())
 }
 
 // Assert that Agent on Failure deletes all existing candidates
-// User can then do an ICE Restart to bring agent back
+// User can then do an ICE Restart to bring agent back.
 func TestConnectionStateFailedDeleteAllCandidates(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1104,40 +1047,41 @@ func TestConnectionStateFailedDeleteAllCandidates(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
-	isFailed := make(chan interface{})
-	assert.NoError(t, aAgent.OnConnectionStateChange(func(c ConnectionState) {
+	isFailed := make(chan any)
+	require.NoError(t, aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		if c == ConnectionStateFailed {
 			close(isFailed)
 		}
 	}))
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 	<-isFailed
 
 	done := make(chan struct{})
-	assert.NoError(t, aAgent.run(context.Background(), func(ctx context.Context, agent *Agent) {
-		assert.Equal(t, len(aAgent.remoteCandidates), 0)
-		assert.Equal(t, len(aAgent.localCandidates), 0)
+	require.NoError(t, aAgent.loop.Run(context.Background(), func(context.Context) {
+		require.Equal(t, len(aAgent.remoteCandidates), 0)
+		require.Equal(t, len(aAgent.localCandidates), 0)
 		close(done)
 	}))
 	<-done
-
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
-// Assert that the ICE Agent can go directly from Connecting -> Failed on both sides
+// Assert that the ICE Agent can go directly from Connecting -> Failed on both sides.
 func TestConnectionStateConnectingToFailed(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1149,10 +1093,16 @@ func TestConnectionStateConnectingToFailed(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
 	var isFailed sync.WaitGroup
 	var isChecking sync.WaitGroup
@@ -1167,168 +1117,160 @@ func TestConnectionStateConnectingToFailed(t *testing.T) {
 		case ConnectionStateChecking:
 			isChecking.Done()
 		case ConnectionStateCompleted:
-			t.Errorf("Unexpected ConnectionState: %v", c)
+			t.Errorf("Unexpected ConnectionState: %v", c) //nolint
 		default:
 		}
 	}
 
-	assert.NoError(t, aAgent.OnConnectionStateChange(connectionStateCheck))
-	assert.NoError(t, bAgent.OnConnectionStateChange(connectionStateCheck))
+	require.NoError(t, aAgent.OnConnectionStateChange(connectionStateCheck))
+	require.NoError(t, bAgent.OnConnectionStateChange(connectionStateCheck))
 
 	go func() {
 		_, err := aAgent.Accept(context.TODO(), "InvalidFrag", "InvalidPwd")
-		assert.Error(t, err)
+		require.Error(t, err)
 	}()
 
 	go func() {
 		_, err := bAgent.Dial(context.TODO(), "InvalidFrag", "InvalidPwd")
-		assert.Error(t, err)
+		require.Error(t, err)
 	}()
 
 	isChecking.Wait()
 	isFailed.Wait()
-
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
 func TestAgentRestart(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	oneSecond := time.Second
 
 	t.Run("Restart During Gather", func(t *testing.T) {
-		connA, connB := pipe(&AgentConfig{
+		connA, connB := pipe(t, &AgentConfig{
 			DisconnectedTimeout: &oneSecond,
 			FailedTimeout:       &oneSecond,
 		})
+		defer closePipe(t, connA, connB)
 
 		ctx, cancel := context.WithCancel(context.Background())
-		assert.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
+		require.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
 			if c == ConnectionStateFailed || c == ConnectionStateDisconnected {
 				cancel()
 			}
 		}))
 
 		connA.agent.gatheringState = GatheringStateGathering
-		assert.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
 
 		<-ctx.Done()
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
 	})
 
 	t.Run("Restart When Closed", func(t *testing.T) {
 		agent, err := NewAgent(&AgentConfig{})
-		assert.NoError(t, err)
-		assert.NoError(t, agent.Close())
+		require.NoError(t, err)
+		require.NoError(t, agent.Close())
 
-		assert.Equal(t, ErrClosed, agent.Restart("", ""))
+		require.Equal(t, ErrClosed, agent.Restart("", ""))
 	})
 
 	t.Run("Restart One Side", func(t *testing.T) {
-		connA, connB := pipe(&AgentConfig{
+		connA, connB := pipe(t, &AgentConfig{
 			DisconnectedTimeout: &oneSecond,
 			FailedTimeout:       &oneSecond,
 		})
+		defer closePipe(t, connA, connB)
 
 		ctx, cancel := context.WithCancel(context.Background())
-		assert.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
+		require.NoError(t, connB.agent.OnConnectionStateChange(func(c ConnectionState) {
 			if c == ConnectionStateFailed || c == ConnectionStateDisconnected {
 				cancel()
 			}
 		}))
-		assert.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
 
 		<-ctx.Done()
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
 	})
 
 	t.Run("Restart Both Sides", func(t *testing.T) {
 		// Get all addresses of candidates concatenated
 		generateCandidateAddressStrings := func(candidates []Candidate, err error) (out string) {
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			for _, c := range candidates {
 				out += c.Address() + ":"
 				out += strconv.Itoa(c.Port())
 			}
+
 			return
 		}
 
 		// Store the original candidates, confirm that after we reconnect we have new pairs
-		connA, connB := pipe(&AgentConfig{
+		connA, connB := pipe(t, &AgentConfig{
 			DisconnectedTimeout: &oneSecond,
 			FailedTimeout:       &oneSecond,
 		})
+		defer closePipe(t, connA, connB)
 		connAFirstCandidates := generateCandidateAddressStrings(connA.agent.GetLocalCandidates())
 		connBFirstCandidates := generateCandidateAddressStrings(connB.agent.GetLocalCandidates())
 
 		aNotifier, aConnected := onConnected()
-		assert.NoError(t, connA.agent.OnConnectionStateChange(aNotifier))
+		require.NoError(t, connA.agent.OnConnectionStateChange(aNotifier))
 
 		bNotifier, bConnected := onConnected()
-		assert.NoError(t, connB.agent.OnConnectionStateChange(bNotifier))
+		require.NoError(t, connB.agent.OnConnectionStateChange(bNotifier))
 
 		// Restart and Re-Signal
-		assert.NoError(t, connA.agent.Restart("", ""))
-		assert.NoError(t, connB.agent.Restart("", ""))
+		require.NoError(t, connA.agent.Restart("", ""))
+		require.NoError(t, connB.agent.Restart("", ""))
 
 		// Exchange Candidates and Credentials
 		ufrag, pwd, err := connB.agent.GetLocalUserCredentials()
-		assert.NoError(t, err)
-		assert.NoError(t, connA.agent.SetRemoteCredentials(ufrag, pwd))
+		require.NoError(t, err)
+		require.NoError(t, connA.agent.SetRemoteCredentials(ufrag, pwd))
 
 		ufrag, pwd, err = connA.agent.GetLocalUserCredentials()
-		assert.NoError(t, err)
-		assert.NoError(t, connB.agent.SetRemoteCredentials(ufrag, pwd))
+		require.NoError(t, err)
+		require.NoError(t, connB.agent.SetRemoteCredentials(ufrag, pwd))
 
-		gatherAndExchangeCandidates(connA.agent, connB.agent)
+		gatherAndExchangeCandidates(t, connA.agent, connB.agent)
 
 		// Wait until both have gone back to connected
 		<-aConnected
 		<-bConnected
 
 		// Assert that we have new candidates each time
-		assert.NotEqual(t, connAFirstCandidates, generateCandidateAddressStrings(connA.agent.GetLocalCandidates()))
-		assert.NotEqual(t, connBFirstCandidates, generateCandidateAddressStrings(connB.agent.GetLocalCandidates()))
-
-		assert.NoError(t, connA.agent.Close())
-		assert.NoError(t, connB.agent.Close())
+		require.NotEqual(t, connAFirstCandidates, generateCandidateAddressStrings(connA.agent.GetLocalCandidates()))
+		require.NotEqual(t, connBFirstCandidates, generateCandidateAddressStrings(connB.agent.GetLocalCandidates()))
 	})
 }
 
 func TestGetRemoteCredentials(t *testing.T) {
 	var config AgentConfig
-	a, err := NewAgent(&config)
-	if err != nil {
-		t.Fatalf("Error constructing ice.Agent: %v", err)
-	}
+	agent, err := NewAgent(&config)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
-	a.remoteUfrag = "remoteUfrag"
-	a.remotePwd = "remotePwd"
+	agent.remoteUfrag = "remoteUfrag"
+	agent.remotePwd = "remotePwd"
 
-	actualUfrag, actualPwd, err := a.GetRemoteUserCredentials()
-	assert.NoError(t, err)
+	actualUfrag, actualPwd, err := agent.GetRemoteUserCredentials()
+	require.NoError(t, err)
 
-	assert.Equal(t, actualUfrag, a.remoteUfrag)
-	assert.Equal(t, actualPwd, a.remotePwd)
-
-	assert.NoError(t, a.Close())
+	require.Equal(t, actualUfrag, agent.remoteUfrag)
+	require.Equal(t, actualPwd, agent.remotePwd)
 }
 
 func TestGetRemoteCandidates(t *testing.T) {
 	var config AgentConfig
 
-	a, err := NewAgent(&config)
-	if err != nil {
-		t.Fatalf("Error constructing ice.Agent: %v", err)
-	}
+	agent, err := NewAgent(&config)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	expectedCandidates := []Candidate{}
 
@@ -1341,27 +1283,26 @@ func TestGetRemoteCandidates(t *testing.T) {
 		}
 
 		cand, errCand := NewCandidateHost(&cfg)
-		assert.NoError(t, errCand)
+		require.NoError(t, errCand)
 
 		expectedCandidates = append(expectedCandidates, cand)
 
-		a.addRemoteCandidate(cand)
+		agent.addRemoteCandidate(cand)
 	}
 
-	actualCandidates, err := a.GetRemoteCandidates()
-	assert.NoError(t, err)
-	assert.ElementsMatch(t, expectedCandidates, actualCandidates)
-
-	assert.NoError(t, a.Close())
+	actualCandidates, err := agent.GetRemoteCandidates()
+	require.NoError(t, err)
+	require.ElementsMatch(t, expectedCandidates, actualCandidates)
 }
 
 func TestGetLocalCandidates(t *testing.T) {
 	var config AgentConfig
 
-	a, err := NewAgent(&config)
-	if err != nil {
-		t.Fatalf("Error constructing ice.Agent: %v", err)
-	}
+	agent, err := NewAgent(&config)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
 
 	dummyConn := &net.UDPConn{}
 	expectedCandidates := []Candidate{}
@@ -1375,27 +1316,23 @@ func TestGetLocalCandidates(t *testing.T) {
 		}
 
 		cand, errCand := NewCandidateHost(&cfg)
-		assert.NoError(t, errCand)
+		require.NoError(t, errCand)
 
 		expectedCandidates = append(expectedCandidates, cand)
 
-		err = a.addCandidate(context.Background(), cand, dummyConn)
-		assert.NoError(t, err)
+		err = agent.addCandidate(context.Background(), cand, dummyConn)
+		require.NoError(t, err)
 	}
 
-	actualCandidates, err := a.GetLocalCandidates()
-	assert.NoError(t, err)
-	assert.ElementsMatch(t, expectedCandidates, actualCandidates)
-
-	assert.NoError(t, a.Close())
+	actualCandidates, err := agent.GetLocalCandidates()
+	require.NoError(t, err)
+	require.ElementsMatch(t, expectedCandidates, actualCandidates)
 }
 
 func TestCloseInConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	disconnectedDuration := time.Second
 	failedDuration := time.Second
@@ -1412,44 +1349,46 @@ func TestCloseInConnectionStateCallback(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
+	var aAgentClosed bool
+	defer func() {
+		if aAgentClosed {
+			return
+		}
+		require.NoError(t, aAgent.Close())
+	}()
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
-	isClosed := make(chan interface{})
-	isConnected := make(chan interface{})
+	isClosed := make(chan any)
+	isConnected := make(chan any)
 	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		switch c {
 		case ConnectionStateConnected:
 			<-isConnected
-			assert.NoError(t, aAgent.Close())
+			require.NoError(t, aAgent.Close())
+			aAgentClosed = true
 		case ConnectionStateClosed:
 			close(isClosed)
 		default:
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 	close(isConnected)
 
 	<-isClosed
-	assert.NoError(t, bAgent.Close())
 }
 
 func TestRunTaskInConnectionStateCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1465,36 +1404,36 @@ func TestRunTaskInConnectionStateCallback(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	check(err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 	bAgent, err := NewAgent(cfg)
-	check(err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
-	isComplete := make(chan interface{})
+	isComplete := make(chan any)
 	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		if c == ConnectionStateConnected {
 			_, _, errCred := aAgent.GetLocalUserCredentials()
-			assert.NoError(t, errCred)
-			assert.NoError(t, aAgent.Restart("", ""))
+			require.NoError(t, errCred)
+			require.NoError(t, aAgent.Restart("", ""))
 			close(isComplete)
 		}
 	})
-	if err != nil {
-		t.Error(err)
-	}
+	require.NoError(t, err)
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 
 	<-isComplete
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
 func TestRunTaskInSelectedCandidatePairChangeCallback(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 5)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 5).Stop()
 
 	oneSecond := time.Second
 	KeepaliveInterval := time.Duration(0)
@@ -1510,44 +1449,45 @@ func TestRunTaskInSelectedCandidatePairChangeCallback(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	check(err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 	bAgent, err := NewAgent(cfg)
-	check(err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
-	isComplete := make(chan interface{})
-	isTested := make(chan interface{})
-	if err = aAgent.OnSelectedCandidatePairChange(func(Candidate, Candidate) {
+	isComplete := make(chan any)
+	isTested := make(chan any)
+	err = aAgent.OnSelectedCandidatePairChange(func(Candidate, Candidate) {
 		go func() {
 			_, _, errCred := aAgent.GetLocalUserCredentials()
-			assert.NoError(t, errCred)
+			require.NoError(t, errCred)
 			close(isTested)
 		}()
-	}); err != nil {
-		t.Error(err)
-	}
-	if err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
+	})
+	require.NoError(t, err)
+
+	err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
 		if c == ConnectionStateConnected {
 			close(isComplete)
 		}
-	}); err != nil {
-		t.Error(err)
-	}
+	})
+	require.NoError(t, err)
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 
 	<-isComplete
 	<-isTested
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
 }
 
-// Assert that a Lite agent goes to disconnected and failed
+// Assert that a Lite agent goes to disconnected and failed.
 func TestLiteLifecycle(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	aNotifier, aConnected := onConnected()
 
@@ -1556,6 +1496,13 @@ func TestLiteLifecycle(t *testing.T) {
 		MulticastDNSMode: MulticastDNSModeDisabled,
 	})
 	require.NoError(t, err)
+	var aClosed bool
+	defer func() {
+		if aClosed {
+			return
+		}
+		require.NoError(t, aAgent.Close())
+	}()
 	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	disconnectedDuration := time.Second
@@ -1573,10 +1520,17 @@ func TestLiteLifecycle(t *testing.T) {
 		CheckInterval:       &CheckInterval,
 	})
 	require.NoError(t, err)
+	var bClosed bool
+	defer func() {
+		if bClosed {
+			return
+		}
+		require.NoError(t, bAgent.Close())
+	}()
 
-	bConnected := make(chan interface{})
-	bDisconnected := make(chan interface{})
-	bFailed := make(chan interface{})
+	bConnected := make(chan any)
+	bDisconnected := make(chan any)
+	bFailed := make(chan any)
 
 	require.NoError(t, bAgent.OnConnectionStateChange(func(c ConnectionState) {
 		switch c {
@@ -1590,53 +1544,55 @@ func TestLiteLifecycle(t *testing.T) {
 		}
 	}))
 
-	connectWithVNet(bAgent, aAgent)
+	connectWithVNet(t, bAgent, aAgent)
 
 	<-aConnected
 	<-bConnected
-	assert.NoError(t, aAgent.Close())
+	require.NoError(t, aAgent.Close())
+	aClosed = true
 
 	<-bDisconnected
 	<-bFailed
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, bAgent.Close())
+	bClosed = true
 }
 
 func TestNilCandidate(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, a.AddRemoteCandidate(nil))
-	assert.NoError(t, a.Close())
+	require.NoError(t, a.AddRemoteCandidate(nil))
+	require.NoError(t, a.Close())
 }
 
 func TestNilCandidatePair(t *testing.T) {
 	a, err := NewAgent(&AgentConfig{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, a.Close())
+	}()
 
 	a.setSelectedPair(nil)
-	assert.NoError(t, a.Close())
 }
 
 func TestGetSelectedCandidatePair(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
 	cfg := &AgentConfig{
 		NetworkTypes: supportedNetworkTypes(),
@@ -1644,158 +1600,414 @@ func TestGetSelectedCandidatePair(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 
 	bAgent, err := NewAgent(cfg)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
 	aAgentPair, err := aAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.Nil(t, aAgentPair)
+	require.NoError(t, err)
+	require.Nil(t, aAgentPair)
 
 	bAgentPair, err := bAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.Nil(t, bAgentPair)
+	require.NoError(t, err)
+	require.Nil(t, bAgentPair)
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 
 	aAgentPair, err = aAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.NotNil(t, aAgentPair)
+	require.NoError(t, err)
+	require.NotNil(t, aAgentPair)
 
 	bAgentPair, err = bAgent.GetSelectedCandidatePair()
-	assert.NoError(t, err)
-	assert.NotNil(t, bAgentPair)
+	require.NoError(t, err)
+	require.NotNil(t, bAgentPair)
 
-	assert.True(t, bAgentPair.Local.Equal(aAgentPair.Remote))
-	assert.True(t, bAgentPair.Remote.Equal(aAgentPair.Local))
+	require.True(t, bAgentPair.Local.Equal(aAgentPair.Remote))
+	require.True(t, bAgentPair.Remote.Equal(aAgentPair.Local))
 
-	assert.NoError(t, wan.Stop())
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
+	require.NoError(t, wan.Stop())
 }
 
-func TestAcceptAggressiveNomination(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+func TestAcceptAggressiveNomination(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	// Create a network with two interfaces
 	wan, err := vnet.NewRouter(&vnet.RouterConfig{
 		CIDR:          "0.0.0.0/0",
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	net0, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.1"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net0))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net0))
 
 	net1, err := vnet.NewNet(&vnet.NetConfig{
 		StaticIPs: []string{"192.168.0.2", "192.168.0.3", "192.168.0.4"},
 	})
-	assert.NoError(t, err)
-	assert.NoError(t, wan.AddNet(net1))
+	require.NoError(t, err)
+	require.NoError(t, wan.AddNet(net1))
 
-	assert.NoError(t, wan.Start())
+	require.NoError(t, wan.Start())
 
-	aNotifier, aConnected := onConnected()
-	bNotifier, bConnected := onConnected()
-
-	KeepaliveInterval := time.Hour
-	cfg0 := &AgentConfig{
-		NetworkTypes:     []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
-		MulticastDNSMode: MulticastDNSModeDisabled,
-		Net:              net0,
-
-		KeepaliveInterval:          &KeepaliveInterval,
-		CheckInterval:              &KeepaliveInterval,
-		AcceptAggressiveNomination: true,
+	testCases := []struct {
+		name                            string
+		isLite                          bool
+		enableUseCandidateCheckPriority bool
+		useHigherPriority               bool
+		isExpectedToSwitch              bool
+	}{
+		{"should accept higher priority - full agent", false, false, true, true},
+		{"should not accept lower priority - full agent", false, false, false, false},
+		{"should accept higher priority - no use-candidate priority check - lite agent", true, false, true, true},
+		{"should accept lower priority - no use-candidate priority check - lite agent", true, false, false, true},
+		{"should accept higher priority - use-candidate priority check - lite agent", true, true, true, true},
+		{"should not accept lower priority - use-candidate priority check - lite agent", true, true, false, false},
 	}
 
-	var aAgent, bAgent *Agent
-	aAgent, err = NewAgent(cfg0)
-	require.NoError(t, err)
-	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			aNotifier, aConnected := onConnected()
+			bNotifier, bConnected := onConnected()
 
-	cfg1 := &AgentConfig{
-		NetworkTypes:      []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
-		MulticastDNSMode:  MulticastDNSModeDisabled,
-		Net:               net1,
-		KeepaliveInterval: &KeepaliveInterval,
-		CheckInterval:     &KeepaliveInterval,
-	}
+			KeepaliveInterval := time.Hour
+			cfg0 := &AgentConfig{
+				NetworkTypes:                    []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
+				MulticastDNSMode:                MulticastDNSModeDisabled,
+				Net:                             net0,
+				KeepaliveInterval:               &KeepaliveInterval,
+				CheckInterval:                   &KeepaliveInterval,
+				Lite:                            tc.isLite,
+				EnableUseCandidateCheckPriority: tc.enableUseCandidateCheckPriority,
+			}
+			if tc.isLite {
+				cfg0.CandidateTypes = []CandidateType{CandidateTypeHost}
+			}
 
-	bAgent, err = NewAgent(cfg1)
-	require.NoError(t, err)
-	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
+			var aAgent, bAgent *Agent
+			aAgent, err = NewAgent(cfg0)
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, aAgent.Close())
+			}()
+			require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
-	aConn, bConn := connect(aAgent, bAgent)
+			cfg1 := &AgentConfig{
+				NetworkTypes:      []NetworkType{NetworkTypeUDP4, NetworkTypeUDP6},
+				MulticastDNSMode:  MulticastDNSModeDisabled,
+				Net:               net1,
+				KeepaliveInterval: &KeepaliveInterval,
+				CheckInterval:     &KeepaliveInterval,
+			}
 
-	// Ensure pair selected
-	// Note: this assumes ConnectionStateConnected is thrown after selecting the final pair
-	<-aConnected
-	<-bConnected
+			bAgent, err = NewAgent(cfg1)
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, bAgent.Close())
+			}()
+			require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	// Send new USE-CANDIDATE message with higher priority to update the selected pair
-	buildMsg := func(class stun.MessageClass, username, key string, priority uint32) *stun.Message {
-		msg, err1 := stun.Build(stun.NewType(stun.MethodBinding, class), stun.TransactionID,
-			stun.NewUsername(username),
-			stun.NewShortTermIntegrity(key),
-			UseCandidate(),
-			PriorityAttr(priority),
-			stun.Fingerprint,
-		)
-		if err1 != nil {
-			t.Fatal(err1)
-		}
+			connect(t, aAgent, bAgent)
 
-		return msg
-	}
+			// Ensure pair selected
+			// Note: this assumes ConnectionStateConnected is thrown after selecting the final pair
+			<-aConnected
+			<-bConnected
 
-	selectedCh := make(chan Candidate, 1)
-	var expectNewSelectedCandidate Candidate
-	err = aAgent.OnSelectedCandidatePairChange(func(_, remote Candidate) {
-		selectedCh <- remote
-	})
-	require.NoError(t, err)
-	var bcandidates []Candidate
-	bcandidates, err = bAgent.GetLocalCandidates()
-	require.NoError(t, err)
+			// Send new USE-CANDIDATE message with priority to update the selected pair
+			buildMsg := func(class stun.MessageClass, username, key string, priority uint32) *stun.Message {
+				msg, err1 := stun.Build(stun.NewType(stun.MethodBinding, class), stun.TransactionID,
+					stun.NewUsername(username),
+					stun.NewShortTermIntegrity(key),
+					UseCandidate(),
+					PriorityAttr(priority),
+					stun.Fingerprint,
+				)
+				require.NoError(t, err1)
 
-	for _, c := range bcandidates {
-		if c != bAgent.getSelectedPair().Local {
-			if expectNewSelectedCandidate == nil {
-			incr_priority:
-				for _, candidates := range aAgent.remoteCandidates {
-					for _, candidate := range candidates {
-						if candidate.Equal(c) {
-							candidate.(*CandidateHost).priorityOverride += 1000 //nolint:forcetypeassert
-							break incr_priority
+				return msg
+			}
+
+			selectedCh := make(chan Candidate, 1)
+			var expectNewSelectedCandidate Candidate
+			err = aAgent.OnSelectedCandidatePairChange(func(_, remote Candidate) {
+				selectedCh <- remote
+			})
+			require.NoError(t, err)
+			var bcandidates []Candidate
+			bcandidates, err = bAgent.GetLocalCandidates()
+			require.NoError(t, err)
+
+			for _, cand := range bcandidates {
+				if cand != bAgent.getSelectedPair().Local { //nolint:nestif
+					if expectNewSelectedCandidate == nil {
+					expected_change_priority:
+						for _, candidates := range aAgent.remoteCandidates {
+							for _, candidate := range candidates {
+								if candidate.Equal(cand) {
+									if tc.useHigherPriority {
+										candidate.(*CandidateHost).priorityOverride += 1000 //nolint:forcetypeassert
+									} else {
+										candidate.(*CandidateHost).priorityOverride -= 1000 //nolint:forcetypeassert
+									}
+
+									break expected_change_priority
+								}
+							}
+						}
+						if tc.isExpectedToSwitch {
+							expectNewSelectedCandidate = cand
+						} else {
+							expectNewSelectedCandidate = aAgent.getSelectedPair().Remote
+						}
+					} else {
+						// a smaller change for other candidates other the new expected one
+					change_priority:
+						for _, candidates := range aAgent.remoteCandidates {
+							for _, candidate := range candidates {
+								if candidate.Equal(cand) {
+									if tc.useHigherPriority {
+										candidate.(*CandidateHost).priorityOverride += 500 //nolint:forcetypeassert
+									} else {
+										candidate.(*CandidateHost).priorityOverride -= 500 //nolint:forcetypeassert
+									}
+
+									break change_priority
+								}
+							}
 						}
 					}
+					_, err = cand.writeTo(
+						buildMsg(
+							stun.ClassRequest,
+							aAgent.localUfrag+":"+aAgent.remoteUfrag,
+							aAgent.localPwd,
+							cand.Priority(),
+						).Raw,
+						bAgent.getSelectedPair().Remote,
+					)
+					require.NoError(t, err)
 				}
-				expectNewSelectedCandidate = c
 			}
-			_, err = c.writeTo(buildMsg(stun.ClassRequest, aAgent.localUfrag+":"+aAgent.remoteUfrag, aAgent.localPwd, c.Priority()).Raw, bAgent.getSelectedPair().Remote)
-			require.NoError(t, err)
+
+			time.Sleep(1 * time.Second)
+			select {
+			case selected := <-selectedCh:
+				require.True(t, selected.Equal(expectNewSelectedCandidate))
+			default:
+				require.False(t, tc.isExpectedToSwitch)
+				require.True(t, aAgent.getSelectedPair().Remote.Equal(expectNewSelectedCandidate))
+			}
+		})
+	}
+
+	require.NoError(t, wan.Stop())
+}
+
+// Close can deadlock but GracefulClose must not.
+func TestAgentGracefulCloseDeadlock(t *testing.T) {
+	defer test.CheckRoutinesStrict(t)()
+	defer test.TimeOut(time.Second * 5).Stop()
+
+	config := &AgentConfig{
+		NetworkTypes: supportedNetworkTypes(),
+	}
+	aAgent, err := NewAgent(config)
+	require.NoError(t, err)
+	var aAgentClosed bool
+	defer func() {
+		if aAgentClosed {
+			return
 		}
+		require.NoError(t, aAgent.Close())
+	}()
+
+	bAgent, err := NewAgent(config)
+	require.NoError(t, err)
+	var bAgentClosed bool
+	defer func() {
+		if bAgentClosed {
+			return
+		}
+		require.NoError(t, bAgent.Close())
+	}()
+
+	var connected, closeNow, closed sync.WaitGroup
+	connected.Add(2)
+	closeNow.Add(1)
+	closed.Add(2)
+	closeHdlr := func(agent *Agent, agentClosed *bool) {
+		require.NoError(t, agent.OnConnectionStateChange(func(cs ConnectionState) {
+			if cs == ConnectionStateConnected {
+				connected.Done()
+				closeNow.Wait()
+
+				go func() {
+					require.NoError(t, agent.GracefulClose())
+					*agentClosed = true
+					closed.Done()
+				}()
+			}
+		}))
 	}
 
-	time.Sleep(1 * time.Second)
-	select {
-	case selected := <-selectedCh:
-		assert.True(t, selected.Equal(expectNewSelectedCandidate))
-	default:
-		t.Fatal("No selected candidate pair")
+	closeHdlr(aAgent, &aAgentClosed)
+	closeHdlr(bAgent, &bAgentClosed)
+
+	t.Log("connecting agents")
+	_, _ = connect(t, aAgent, bAgent)
+
+	t.Log("waiting for them to confirm connection in callback")
+	connected.Wait()
+
+	t.Log("tell them to close themselves in the same callback and wait")
+	closeNow.Done()
+	closed.Wait()
+}
+
+func TestSetCandidatesUfrag(t *testing.T) {
+	var config AgentConfig
+
+	agent, err := NewAgent(&config)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
+
+	dummyConn := &net.UDPConn{}
+
+	for i := 0; i < 5; i++ {
+		cfg := CandidateHostConfig{
+			Network:   "udp",
+			Address:   "192.168.0.2",
+			Port:      1000 + i,
+			Component: 1,
+		}
+
+		cand, errCand := NewCandidateHost(&cfg)
+		require.NoError(t, errCand)
+
+		err = agent.addCandidate(context.Background(), cand, dummyConn)
+		require.NoError(t, err)
 	}
 
-	assert.NoError(t, wan.Stop())
-	if !closePipe(t, aConn, bConn) {
-		return
+	actualCandidates, err := agent.GetLocalCandidates()
+	require.NoError(t, err)
+
+	for _, candidate := range actualCandidates {
+		ext, ok := candidate.GetExtension("ufrag")
+
+		require.True(t, ok)
+		require.Equal(t, agent.localUfrag, ext.Value)
 	}
+}
+
+func TestAlwaysSentKeepAlive(t *testing.T) { //nolint:cyclop
+	defer test.CheckRoutines(t)()
+
+	// Avoid deadlocks?
+	defer test.TimeOut(1 * time.Second).Stop()
+
+	agent, err := NewAgent(&AgentConfig{})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, agent.Close())
+	}()
+
+	log := logging.NewDefaultLoggerFactory().NewLogger("agent")
+	agent.selector = &controllingSelector{agent: agent, log: log}
+	pair := makeCandidatePair(t)
+	s, ok := pair.Local.(*CandidateHost)
+	require.True(t, ok)
+	s.conn = &fakenet.MockPacketConn{}
+	agent.setSelectedPair(pair)
+
+	pair.Remote.seen(false)
+
+	lastSent := pair.Local.LastSent()
+	agent.checkKeepalive()
+	newLastSent := pair.Local.LastSent()
+	require.NotEqual(t, lastSent, newLastSent)
+	lastSent = newLastSent
+
+	// sleep, so there is difference in sent time of local candidate
+	time.Sleep(10 * time.Millisecond)
+	agent.checkKeepalive()
+	newLastSent = pair.Local.LastSent()
+	require.NotEqual(t, lastSent, newLastSent)
+}
+
+func TestRoleConflict(t *testing.T) {
+	defer test.CheckRoutines(t)()
+	defer test.TimeOut(time.Second * 30).Stop()
+
+	runTest := func(doDial bool) {
+		cfg := &AgentConfig{
+			NetworkTypes:     supportedNetworkTypes(),
+			MulticastDNSMode: MulticastDNSModeDisabled,
+			InterfaceFilter:  problematicNetworkInterfaces,
+		}
+
+		aAgent, err := NewAgent(cfg)
+		require.NoError(t, err)
+
+		bAgent, err := NewAgent(cfg)
+		require.NoError(t, err)
+
+		isConnected := make(chan any)
+		err = aAgent.OnConnectionStateChange(func(c ConnectionState) {
+			if c == ConnectionStateConnected {
+				close(isConnected)
+			}
+		})
+		require.NoError(t, err)
+
+		gatherAndExchangeCandidates(t, aAgent, bAgent)
+
+		go func() {
+			ufrag, pwd, routineErr := bAgent.GetLocalUserCredentials()
+			require.NoError(t, routineErr)
+
+			if doDial {
+				_, routineErr = aAgent.Dial(context.TODO(), ufrag, pwd)
+			} else {
+				_, routineErr = aAgent.Accept(context.TODO(), ufrag, pwd)
+			}
+			require.NoError(t, routineErr)
+		}()
+
+		ufrag, pwd, err := aAgent.GetLocalUserCredentials()
+		require.NoError(t, err)
+
+		if doDial {
+			_, err = bAgent.Dial(context.TODO(), ufrag, pwd)
+		} else {
+			_, err = bAgent.Accept(context.TODO(), ufrag, pwd)
+		}
+		require.NoError(t, err)
+
+		<-isConnected
+
+		require.NoError(t, aAgent.Close())
+		require.NoError(t, bAgent.Close())
+	}
+
+	t.Run("Controlling", func(t *testing.T) {
+		runTest(true)
+	})
+
+	t.Run("Controlled", func(t *testing.T) {
+		runTest(false)
+	})
 }

@@ -7,7 +7,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNetworkTypeParsing_Success(t *testing.T) {
@@ -45,14 +45,9 @@ func TestNetworkTypeParsing_Success(t *testing.T) {
 			NetworkTypeUDP6,
 		},
 	} {
-		actual, err := determineNetworkType(test.inNetwork, test.inIP)
-		if err != nil {
-			t.Errorf("NetworkTypeParsing failed: %v", err)
-		}
-		if actual != test.expected {
-			t.Errorf("NetworkTypeParsing: '%s' -- input:%s expected:%s actual:%s",
-				test.name, test.inNetwork, test.expected, actual)
-		}
+		actual, err := determineNetworkType(test.inNetwork, mustAddr(t, test.inIP))
+		require.NoError(t, err)
+		require.Equal(t, test.expected, actual)
 	}
 }
 
@@ -70,24 +65,21 @@ func TestNetworkTypeParsing_Failure(t *testing.T) {
 			ipv6,
 		},
 	} {
-		actual, err := determineNetworkType(test.inNetwork, test.inIP)
-		if err == nil {
-			t.Errorf("NetworkTypeParsing should fail: '%s' -- input:%s actual:%s",
-				test.name, test.inNetwork, actual)
-		}
+		_, err := determineNetworkType(test.inNetwork, mustAddr(t, test.inIP))
+		require.Error(t, err)
 	}
 }
 
 func TestNetworkTypeIsUDP(t *testing.T) {
-	assert.True(t, NetworkTypeUDP4.IsUDP())
-	assert.True(t, NetworkTypeUDP6.IsUDP())
-	assert.False(t, NetworkTypeUDP4.IsTCP())
-	assert.False(t, NetworkTypeUDP6.IsTCP())
+	require.True(t, NetworkTypeUDP4.IsUDP())
+	require.True(t, NetworkTypeUDP6.IsUDP())
+	require.False(t, NetworkTypeUDP4.IsTCP())
+	require.False(t, NetworkTypeUDP6.IsTCP())
 }
 
 func TestNetworkTypeIsTCP(t *testing.T) {
-	assert.True(t, NetworkTypeTCP4.IsTCP())
-	assert.True(t, NetworkTypeTCP6.IsTCP())
-	assert.False(t, NetworkTypeTCP4.IsUDP())
-	assert.False(t, NetworkTypeTCP6.IsUDP())
+	require.True(t, NetworkTypeTCP4.IsTCP())
+	require.True(t, NetworkTypeTCP6.IsTCP())
+	require.False(t, NetworkTypeTCP4.IsUDP())
+	require.False(t, NetworkTypeTCP6.IsUDP())
 }

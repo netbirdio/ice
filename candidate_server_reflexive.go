@@ -3,14 +3,17 @@
 
 package ice
 
-import "net"
+import (
+	"net"
+	"net/netip"
+)
 
 // CandidateServerReflexive ...
 type CandidateServerReflexive struct {
 	candidateBase
 }
 
-// CandidateServerReflexiveConfig is the config required to create a new CandidateServerReflexive
+// CandidateServerReflexiveConfig is the config required to create a new CandidateServerReflexive.
 type CandidateServerReflexiveConfig struct {
 	CandidateID string
 	Network     string
@@ -23,14 +26,14 @@ type CandidateServerReflexiveConfig struct {
 	RelPort     int
 }
 
-// NewCandidateServerReflexive creates a new server reflective candidate
+// NewCandidateServerReflexive creates a new server reflective candidate.
 func NewCandidateServerReflexive(config *CandidateServerReflexiveConfig) (*CandidateServerReflexive, error) {
-	ip := net.ParseIP(config.Address)
-	if ip == nil {
-		return nil, ErrAddressParseFailed
+	ipAddr, err := netip.ParseAddr(config.Address)
+	if err != nil {
+		return nil, err
 	}
 
-	networkType, err := determineNetworkType(config.Network, ip)
+	networkType, err := determineNetworkType(config.Network, ipAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -42,12 +45,16 @@ func NewCandidateServerReflexive(config *CandidateServerReflexiveConfig) (*Candi
 
 	return &CandidateServerReflexive{
 		candidateBase: candidateBase{
-			id:                 candidateID,
-			networkType:        networkType,
-			candidateType:      CandidateTypeServerReflexive,
-			address:            config.Address,
-			port:               config.Port,
-			resolvedAddr:       &net.UDPAddr{IP: ip, Port: config.Port},
+			id:            candidateID,
+			networkType:   networkType,
+			candidateType: CandidateTypeServerReflexive,
+			address:       config.Address,
+			port:          config.Port,
+			resolvedAddr: &net.UDPAddr{
+				IP:   ipAddr.AsSlice(),
+				Port: config.Port,
+				Zone: ipAddr.Zone(),
+			},
 			component:          config.Component,
 			foundationOverride: config.Foundation,
 			priorityOverride:   config.Priority,

@@ -5,7 +5,7 @@ package ice
 
 import (
 	"fmt"
-	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -27,7 +27,7 @@ func supportedNetworkTypes() []NetworkType {
 	}
 }
 
-// NetworkType represents the type of network
+// NetworkType represents the type of network.
 type NetworkType int
 
 const (
@@ -69,7 +69,7 @@ func (t NetworkType) IsTCP() bool {
 	return t == NetworkTypeTCP4 || t == NetworkTypeTCP6
 }
 
-// NetworkShort returns the short network description
+// NetworkShort returns the short network description.
 func (t NetworkType) NetworkShort() string {
 	switch t {
 	case NetworkTypeUDP4, NetworkTypeUDP6:
@@ -81,7 +81,7 @@ func (t NetworkType) NetworkShort() string {
 	}
 }
 
-// IsReliable returns true if the network is reliable
+// IsReliable returns true if the network is reliable.
 func (t NetworkType) IsReliable() bool {
 	switch t {
 	case NetworkTypeUDP4, NetworkTypeUDP6:
@@ -89,6 +89,7 @@ func (t NetworkType) IsReliable() bool {
 	case NetworkTypeTCP4, NetworkTypeTCP6:
 		return true
 	}
+
 	return false
 }
 
@@ -100,6 +101,7 @@ func (t NetworkType) IsIPv4() bool {
 	case NetworkTypeUDP6, NetworkTypeTCP6:
 		return false
 	}
+
 	return false
 }
 
@@ -111,25 +113,28 @@ func (t NetworkType) IsIPv6() bool {
 	case NetworkTypeUDP6, NetworkTypeTCP6:
 		return true
 	}
+
 	return false
 }
 
 // determineNetworkType determines the type of network based on
 // the short network string and an IP address.
-func determineNetworkType(network string, ip net.IP) (NetworkType, error) {
-	ipv4 := ip.To4() != nil
-
+func determineNetworkType(network string, ip netip.Addr) (NetworkType, error) {
+	// we'd rather have an IPv4-mapped IPv6 become IPv4 so that it is usable.
+	ip = ip.Unmap()
 	switch {
 	case strings.HasPrefix(strings.ToLower(network), udp):
-		if ipv4 {
+		if ip.Is4() {
 			return NetworkTypeUDP4, nil
 		}
+
 		return NetworkTypeUDP6, nil
 
 	case strings.HasPrefix(strings.ToLower(network), tcp):
-		if ipv4 {
+		if ip.Is4() {
 			return NetworkTypeTCP4, nil
 		}
+
 		return NetworkTypeTCP6, nil
 	}
 

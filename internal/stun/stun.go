@@ -10,7 +10,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 )
 
 var (
@@ -59,7 +59,7 @@ func GetXORMappedAddr(conn net.PacketConn, serverAddr net.Addr, timeout time.Dur
 	return &addr, nil
 }
 
-// AssertUsername checks that the given STUN message m has a USERNAME attribute with a given value
+// AssertUsername checks that the given STUN message m has a USERNAME attribute with a given value.
 func AssertUsername(m *stun.Message, expectedUsername string) error {
 	var username stun.Username
 	if err := username.GetFrom(m); err != nil {

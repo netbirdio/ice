@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,13 +43,15 @@ func TestUniversalUDPMux(t *testing.T) {
 }
 
 func testMuxSrflxConnection(t *testing.T, udpMux *UniversalUDPMuxDefault, ufrag string, network string) {
+	t.Helper()
+
 	pktConn, err := udpMux.GetConn(ufrag, udpMux.LocalAddr())
 	require.NoError(t, err, "error retrieving muxed connection for ufrag")
 	defer func() {
 		_ = pktConn.Close()
 	}()
 
-	remoteConn, err := net.DialUDP(network, nil, &net.UDPAddr{
+	remoteConn, err := net.DialUDP(network, nil, &net.UDPAddr{ // nolint
 		Port: udpMux.LocalAddr().(*net.UDPAddr).Port,
 	})
 	require.NoError(t, err, "error dialing test UDP connection")

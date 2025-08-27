@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 )
 
 type pairCandidateSelector interface {
@@ -44,6 +44,7 @@ func (s *controllingSelector) isNominatable(c Candidate) bool {
 	}
 
 	s.log.Errorf("Invalid candidate type: %s", c.Type())
+
 	return false
 }
 
@@ -59,10 +60,11 @@ func (s *controllingSelector) ContactCandidates() {
 	default:
 		p := s.agent.getBestValidCandidatePair()
 		if p != nil && s.isNominatable(p.Local) && s.isNominatable(p.Remote) {
-			s.log.Tracef("Nominatable pair found, nominating (%s, %s)", p.Local.String(), p.Remote.String())
+			s.log.Tracef("Nominatable pair found, nominating (%s, %s)", p.Local, p.Remote)
 			p.nominated = true
 			s.nominatedPair = p
 			s.nominatePair(p)
+
 			return
 		}
 		s.agent.pingAllCandidates()
@@ -84,40 +86,54 @@ func (s *controllingSelector) nominatePair(pair *CandidatePair) {
 	)
 	if err != nil {
 		s.log.Error(err.Error())
+
 		return
 	}
 
-	s.log.Tracef("Ping STUN (nominate candidate pair) from %s to %s", pair.Local.String(), pair.Remote.String())
+	s.log.Tracef("Ping STUN (nominate candidate pair) from %s to %s", pair.Local, pair.Remote)
 	s.agent.sendBindingRequest(msg, pair.Local, pair.Remote)
 }
 
-func (s *controllingSelector) HandleBindingRequest(m *stun.Message, local, remote Candidate) {
-	s.agent.sendBindingSuccess(m, local, remote)
+func (s *controllingSelector) HandleBindingRequest(message *stun.Message, local, remote Candidate) { //nolint:cyclop
+	s.agent.sendBindingSuccess(message, local, remote)
 
-	p := s.agent.findPair(local, remote)
+	pair := s.agent.findPair(local, remote)
 
-	if p == nil {
-		s.agent.addPair(local, remote)
+	if pair == nil {
+		pair = s.agent.addPair(local, remote)
+		pair.UpdateRequestReceived()
+
 		return
 	}
+	pair.UpdateRequestReceived()
 
-	if p.state == CandidatePairStateSucceeded && s.nominatedPair == nil && s.agent.getSelectedPair() == nil {
+	if pair.state == CandidatePairStateSucceeded && s.nominatedPair == nil && s.agent.getSelectedPair() == nil {
 		bestPair := s.agent.getBestAvailableCandidatePair()
 		if bestPair == nil {
 			s.log.Tracef("No best pair available")
-		} else if bestPair.equal(p) && s.isNominatable(p.Local) && s.isNominatable(p.Remote) {
-			s.log.Tracef("The candidate (%s, %s) is the best candidate available, marking it as nominated",
-				p.Local.String(), p.Remote.String())
-			s.nominatedPair = p
-			s.nominatePair(p)
+		} else if bestPair.equal(pair) && s.isNominatable(pair.Local) && s.isNominatable(pair.Remote) {
+			s.log.Tracef(
+				"The candidate (%s, %s) is the best candidate available, marking it as nominated",
+				pair.Local,
+				pair.Remote,
+			)
+			s.nominatedPair = pair
+			s.nominatePair(pair)
+		}
+	}
+
+	if s.agent.userBindingRequestHandler != nil {
+		if shouldSwitch := s.agent.userBindingRequestHandler(message, local, remote, pair); shouldSwitch {
+			s.agent.setSelectedPair(pair)
 		}
 	}
 }
 
 func (s *controllingSelector) HandleSuccessResponse(m *stun.Message, local, remote Candidate, remoteAddr net.Addr) {
-	ok, pendingRequest := s.agent.handleInboundBindingSuccess(m.TransactionID)
+	ok, pendingRequest, rtt := s.agent.handleInboundBindingSuccess(m.TransactionID)
 	if !ok {
 		s.log.Warnf("Discard message from (%s), unknown TransactionID 0x%x", remote, m.TransactionID)
+
 		return
 	}
 
@@ -126,29 +142,32 @@ func (s *controllingSelector) HandleSuccessResponse(m *stun.Message, local, remo
 	// Assert that NAT is not symmetric
 	// https://tools.ietf.org/html/rfc8445#section-7.2.5.2.1
 	if !addrEqual(transactionAddr, remoteAddr) {
-		s.log.Debugf("Discard message: transaction source and destination does not match expected(%s), actual(%s)", transactionAddr, remote)
+		s.log.Debugf(
+			"Discard message: transaction source and destination does not match expected(%s), actual(%s)",
+			transactionAddr,
+			remote,
+		)
+
 		return
 	}
 
-	s.log.Tracef("Inbound STUN (SuccessResponse) from %s to %s", remote.String(), local.String())
-	p := s.agent.findPair(local, remote)
+	s.log.Tracef("Inbound STUN (SuccessResponse) from %s to %s", remote, local)
+	pair := s.agent.findPair(local, remote)
 
-	if p == nil {
+	if pair == nil {
 		// This shouldn't happen
 		s.log.Error("Success response from invalid candidate pair")
+
 		return
 	}
 
-	p.state = CandidatePairStateSucceeded
-	s.log.Tracef("Found valid candidate pair: %s", p)
+	pair.state = CandidatePairStateSucceeded
+	s.log.Tracef("Found valid candidate pair: %s", pair)
 	if pendingRequest.isUseCandidate && s.agent.getSelectedPair() == nil {
-		s.agent.setSelectedPair(p)
+		s.agent.setSelectedPair(pair)
 	}
 
-	ok = p.markBindingResponse(m.TransactionID)
-	if ok && s.agent.getSelectedPair() == p {
-		s.agent.onSuccessfulSelectedPairBindingResponse(p)
-	}
+	pair.UpdateRoundTripTime(rtt)
 }
 
 func (s *controllingSelector) PingCandidate(local, remote Candidate) {
@@ -161,6 +180,7 @@ func (s *controllingSelector) PingCandidate(local, remote Candidate) {
 	)
 	if err != nil {
 		s.log.Error(err.Error())
+
 		return
 	}
 
@@ -196,6 +216,7 @@ func (s *controlledSelector) PingCandidate(local, remote Candidate) {
 	)
 	if err != nil {
 		s.log.Error(err.Error())
+
 		return
 	}
 
@@ -211,9 +232,10 @@ func (s *controlledSelector) HandleSuccessResponse(m *stun.Message, local, remot
 	// request with an appropriate error code response (e.g., 400)
 	// [RFC5389].
 
-	ok, pendingRequest := s.agent.handleInboundBindingSuccess(m.TransactionID)
+	ok, pendingRequest, rtt := s.agent.handleInboundBindingSuccess(m.TransactionID)
 	if !ok {
 		s.log.Warnf("Discard message from (%s), unknown TransactionID 0x%x", remote, m.TransactionID)
+
 		return
 	}
 
@@ -222,57 +244,63 @@ func (s *controlledSelector) HandleSuccessResponse(m *stun.Message, local, remot
 	// Assert that NAT is not symmetric
 	// https://tools.ietf.org/html/rfc8445#section-7.2.5.2.1
 	if !addrEqual(transactionAddr, remoteAddr) {
-		s.log.Debugf("Discard message: transaction source and destination does not match expected(%s), actual(%s)", transactionAddr, remote)
+		s.log.Debugf(
+			"Discard message: transaction source and destination does not match expected(%s), actual(%s)",
+			transactionAddr,
+			remote,
+		)
+
 		return
 	}
 
-	s.log.Tracef("Inbound STUN (SuccessResponse) from %s to %s", remote.String(), local.String())
+	s.log.Tracef("Inbound STUN (SuccessResponse) from %s to %s", remote, local)
 
-	p := s.agent.findPair(local, remote)
-	if p == nil {
+	pair := s.agent.findPair(local, remote)
+	if pair == nil {
 		// This shouldn't happen
 		s.log.Error("Success response from invalid candidate pair")
+
 		return
 	}
 
-	ok = p.markBindingResponse(m.TransactionID)
-	if ok {
-		s.agent.onSuccessfulSelectedPairBindingResponse(p)
-	}
-
-	p.state = CandidatePairStateSucceeded
-	s.log.Tracef("Found valid candidate pair: %s", p)
-	if p.nominateOnBindingSuccess {
+	pair.state = CandidatePairStateSucceeded
+	s.log.Tracef("Found valid candidate pair: %s", pair)
+	if pair.nominateOnBindingSuccess {
 		if selectedPair := s.agent.getSelectedPair(); selectedPair == nil ||
-			(selectedPair != p && selectedPair.priority() <= p.priority()) {
-			s.agent.setSelectedPair(p)
-		} else if selectedPair != p {
-			s.log.Tracef("Ignore nominate new pair %s, already nominated pair %s", p, selectedPair)
+			(selectedPair != pair &&
+				(!s.agent.needsToCheckPriorityOnNominated() || selectedPair.priority() <= pair.priority())) {
+			s.agent.setSelectedPair(pair)
+		} else if selectedPair != pair {
+			s.log.Tracef("Ignore nominate new pair %s, already nominated pair %s", pair, selectedPair)
 		}
 	}
+
+	pair.UpdateRoundTripTime(rtt)
 }
 
-func (s *controlledSelector) HandleBindingRequest(m *stun.Message, local, remote Candidate) {
-	useCandidate := m.Contains(stun.AttrUseCandidate)
-
-	p := s.agent.findPair(local, remote)
-	if p == nil {
-		p = s.agent.addPair(local, remote)
+func (s *controlledSelector) HandleBindingRequest(message *stun.Message, local, remote Candidate) { //nolint:cyclop
+	pair := s.agent.findPair(local, remote)
+	if pair == nil {
+		pair = s.agent.addPair(local, remote)
 	}
+	pair.UpdateRequestReceived()
 
-	if useCandidate {
+	if message.Contains(stun.AttrUseCandidate) { //nolint:nestif
 		// https://tools.ietf.org/html/rfc8445#section-7.3.1.5
 
-		if p.state == CandidatePairStateSucceeded {
+		if pair.state == CandidatePairStateSucceeded {
 			// If the state of this pair is Succeeded, it means that the check
 			// previously sent by this pair produced a successful response and
 			// generated a valid pair (Section 7.2.5.3.2).  The agent sets the
 			// nominated flag value of the valid pair to true.
-			if selectedPair := s.agent.getSelectedPair(); selectedPair == nil ||
-				(selectedPair != p && selectedPair.priority() <= p.priority()) {
-				s.agent.setSelectedPair(p)
-			} else if selectedPair != p {
-				s.log.Tracef("Ignore nominate new pair %s, already nominated pair %s", p, selectedPair)
+			selectedPair := s.agent.getSelectedPair()
+			if selectedPair == nil ||
+				(selectedPair != pair &&
+					(!s.agent.needsToCheckPriorityOnNominated() ||
+						selectedPair.priority() <= pair.priority())) {
+				s.agent.setSelectedPair(pair)
+			} else if selectedPair != pair {
+				s.log.Tracef("Ignore nominate new pair %s, already nominated pair %s", pair, selectedPair)
 			}
 		} else {
 			// If the received Binding request triggered a new check to be
@@ -283,19 +311,25 @@ func (s *controlledSelector) HandleBindingRequest(m *stun.Message, local, remote
 			// MUST remove the candidate pair from the valid list, set the
 			// candidate pair state to Failed, and set the checklist state to
 			// Failed.
-			p.nominateOnBindingSuccess = true
+			pair.nominateOnBindingSuccess = true
 		}
 	}
 
-	s.agent.sendBindingSuccess(m, local, remote)
+	s.agent.sendBindingSuccess(message, local, remote)
 	s.PingCandidate(local, remote)
+
+	if s.agent.userBindingRequestHandler != nil {
+		if shouldSwitch := s.agent.userBindingRequestHandler(message, local, remote, pair); shouldSwitch {
+			s.agent.setSelectedPair(pair)
+		}
+	}
 }
 
 type liteSelector struct {
 	pairCandidateSelector
 }
 
-// A lite selector should not contact candidates
+// A lite selector should not contact candidates.
 func (s *liteSelector) ContactCandidates() {
 	if _, ok := s.pairCandidateSelector.(*controllingSelector); ok {
 		//nolint:godox

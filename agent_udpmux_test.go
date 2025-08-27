@@ -16,13 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMuxAgent is an end to end test over UDP mux, ensuring two agents could connect over mux
+// TestMuxAgent is an end to end test over UDP mux, ensuring two agents could connect over mux.
 func TestMuxAgent(t *testing.T) {
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
 	const muxPort = 7686
 
@@ -49,16 +47,31 @@ func TestMuxAgent(t *testing.T) {
 				NetworkTypes: []NetworkType{
 					NetworkTypeUDP4,
 				},
+				IncludeLoopback: addr.IP.IsLoopback(),
 			})
 			require.NoError(t, err)
+			var muxedAClosed bool
+			defer func() {
+				if muxedAClosed {
+					return
+				}
+				require.NoError(t, muxedA.Close())
+			}()
 
-			a, err := NewAgent(&AgentConfig{
+			agent, err := NewAgent(&AgentConfig{
 				CandidateTypes: []CandidateType{CandidateTypeHost},
 				NetworkTypes:   supportedNetworkTypes(),
 			})
 			require.NoError(t, err)
+			var aClosed bool
+			defer func() {
+				if aClosed {
+					return
+				}
+				require.NoError(t, agent.Close())
+			}()
 
-			conn, muxedConn := connect(a, muxedA)
+			conn, muxedConn := connect(t, agent, muxedA)
 
 			pair := muxedA.getSelectedPair()
 			require.NotNil(t, pair)
@@ -84,7 +97,9 @@ func TestMuxAgent(t *testing.T) {
 
 			// Close it down
 			require.NoError(t, conn.Close())
+			aClosed = true
 			require.NoError(t, muxedConn.Close())
+			muxedAClosed = true
 			require.NoError(t, udpMux.Close())
 
 			// Expect error when reading from closed mux

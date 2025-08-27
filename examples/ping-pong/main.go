@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/pion/ice/v3"
+	"github.com/pion/ice/v4"
 	"github.com/pion/randutil"
 )
 
@@ -26,7 +26,7 @@ var (
 	localHTTPPort, remoteHTTPPort int
 )
 
-// HTTP Listener to get ICE Credentials from remote Peer
+// HTTP Listener to get ICE Credentials from remote Peer.
 func remoteAuth(_ http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		panic(err)
@@ -36,7 +36,7 @@ func remoteAuth(_ http.ResponseWriter, r *http.Request) {
 	remoteAuthChannel <- r.PostForm["pwd"][0]
 }
 
-// HTTP Listener to get ICE Candidate from remote Peer
+// HTTP Listener to get ICE Candidate from remote Peer.
 func remoteCandidate(_ http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		panic(err)

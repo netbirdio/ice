@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/stun/v2"
+	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
-	"github.com/pion/turn/v3"
-	"github.com/stretchr/testify/assert"
+	"github.com/pion/turn/v4"
+	"github.com/stretchr/testify/require"
 )
 
 func optimisticAuthHandler(string, string, net.Addr) (key []byte, ok bool) {
@@ -24,15 +24,13 @@ func optimisticAuthHandler(string, string, net.Addr) (key []byte, ok bool) {
 
 func TestRelayOnlyConnection(t *testing.T) {
 	// Limit runtime in case of deadlocks
-	lim := test.TimeOut(time.Second * 30)
-	defer lim.Stop()
+	defer test.TimeOut(time.Second * 30).Stop()
 
-	report := test.CheckRoutines(t)
-	defer report()
+	defer test.CheckRoutines(t)()
 
 	serverPort := randomPort(t)
-	serverListener, err := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(serverPort))
-	assert.NoError(t, err)
+	serverListener, err := net.ListenPacket("udp", localhostIPStr+":"+strconv.Itoa(serverPort))
+	require.NoError(t, err)
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:       "pion.ly",
@@ -40,18 +38,21 @@ func TestRelayOnlyConnection(t *testing.T) {
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            serverListener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: "127.0.0.1"},
+				RelayAddressGenerator: &turn.RelayAddressGeneratorNone{Address: localhostIPStr + ""},
 			},
 		},
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, server.Close())
+	}()
 
 	cfg := &AgentConfig{
 		NetworkTypes: supportedNetworkTypes(),
 		Urls: []*stun.URI{
 			{
 				Scheme:   stun.SchemeTypeTURN,
-				Host:     "127.0.0.1",
+				Host:     localhostIPStr + "",
 				Username: "username",
 				Password: "password",
 				Port:     serverPort,
@@ -62,30 +63,24 @@ func TestRelayOnlyConnection(t *testing.T) {
 	}
 
 	aAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, aAgent.Close())
+	}()
 
 	aNotifier, aConnected := onConnected()
-	if err = aAgent.OnConnectionStateChange(aNotifier); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, aAgent.OnConnectionStateChange(aNotifier))
 
 	bAgent, err := NewAgent(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, bAgent.Close())
+	}()
 
 	bNotifier, bConnected := onConnected()
-	if err = bAgent.OnConnectionStateChange(bNotifier); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, bAgent.OnConnectionStateChange(bNotifier))
 
-	connect(aAgent, bAgent)
+	connect(t, aAgent, bAgent)
 	<-aConnected
 	<-bConnected
-
-	assert.NoError(t, aAgent.Close())
-	assert.NoError(t, bAgent.Close())
-	assert.NoError(t, server.Close())
 }
