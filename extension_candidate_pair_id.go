@@ -7,14 +7,14 @@ import (
 
 const (
 	// used in RDP for candidate ID extension
-	extensionKeyCandidateID = "cid"
+	ExtensionKeyCandidateID = "cid"
 
 	candidateIDPrefix = "candidate:"
 )
 
 func candidateIDFromExtensions(extensions []CandidateExtension) string {
 	for _, ext := range extensions {
-		if ext.Key == extensionKeyCandidateID {
+		if ext.Key == ExtensionKeyCandidateID {
 			return fmt.Sprintf("candidate:%s", ext.Value)
 		}
 	}
@@ -24,7 +24,7 @@ func candidateIDFromExtensions(extensions []CandidateExtension) string {
 
 func newCandidateIDExtension(candidateID string) CandidateExtension {
 	return CandidateExtension{
-		Key:   extensionKeyCandidateID,
+		Key:   ExtensionKeyCandidateID,
 		Value: strings.TrimPrefix(candidateID, candidateIDPrefix),
 	}
 }
