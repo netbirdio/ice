@@ -14,12 +14,11 @@ import (
 	"sync"
 
 	"github.com/pion/dtls/v3"
+	"github.com/pion/ice/v4/internal/fakenet"
+	stunx "github.com/pion/ice/v4/internal/stun"
 	"github.com/pion/logging"
 	"github.com/pion/stun/v3"
 	"github.com/pion/turn/v4"
-
-	"github.com/pion/ice/v4/internal/fakenet"
-	stunx "github.com/pion/ice/v4/internal/stun"
 )
 
 // Close a net.Conn and log if we have a failure.

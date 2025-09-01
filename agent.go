@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	stunx "github.com/pion/ice/v4/internal/stun"
+	"github.com/pion/ice/v4/internal/taskloop"
 	"github.com/pion/logging"
 	"github.com/pion/mdns/v2"
 	"github.com/pion/stun/v3"
@@ -24,9 +26,6 @@ import (
 	"github.com/pion/transport/v3/stdnet"
 	"github.com/pion/transport/v3/vnet"
 	"golang.org/x/net/proxy"
-
-	stunx "github.com/pion/ice/v4/internal/stun"
-	"github.com/pion/ice/v4/internal/taskloop"
 )
 
 type bindingRequest struct {
