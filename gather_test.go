@@ -888,7 +888,7 @@ func (m *universalUDPMuxMock) GetRelayedAddr(net.Addr, time.Duration) (*net.Addr
 	return nil, errNotImplemented
 }
 
-func (m *universalUDPMuxMock) GetConnForURL(string, string, net.Addr) (net.PacketConn, error) {
+func (m *universalUDPMuxMock) GetConnForURL(string, string, net.Addr, string) (net.PacketConn, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.getConnForURLTimes++

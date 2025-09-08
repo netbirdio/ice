@@ -21,7 +21,7 @@ import (
 // UDPMux allows multiple connections to go over a single UDP port.
 type UDPMux interface {
 	io.Closer
-	GetConn(ufrag string, addr net.Addr) (net.PacketConn, error)
+	GetConn(ufrag string, addr net.Addr, candidateID string) (net.PacketConn, error)
 	RemoveConnByUfrag(ufrag string)
 	GetListenAddresses() []net.Addr
 }
@@ -146,7 +146,7 @@ func (m *UDPMuxDefault) GetListenAddresses() []net.Addr {
 
 // GetConn returns a PacketConn given the connection's ufrag and network address.
 // creates the connection if an existing one can't be found.
-func (m *UDPMuxDefault) GetConn(ufrag string, addr net.Addr) (net.PacketConn, error) {
+func (m *UDPMuxDefault) GetConn(ufrag string, addr net.Addr, _ string) (net.PacketConn, error) {
 	// don't check addr for mux using unspecified address
 	if len(m.localAddrsForUnspecified) == 0 && m.params.UDPConnString != addr.String() {
 		return nil, errInvalidAddress

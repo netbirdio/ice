@@ -383,16 +383,15 @@ func (a *Agent) gatherCandidatesLocalUDPMux(ctx context.Context) error { //nolin
 			continue
 		}
 
-		conn, err := a.udpMux.GetConn(a.localUfrag, udpAddr)
-		if err != nil {
-			return err
-		}
-
 		c, err := NewCandidateHost(&hostConfig)
 		if err != nil {
-			closeConnAndLog(conn, a.log, "failed to create host mux candidate: %s %d: %v", candidateIP, udpAddr.Port, err)
-
+			closeConnAndLog(nil, a.log, "failed to create host mux candidate: %s %d: %v", candidateIP, udpAddr.Port, err)
 			continue
+		}
+
+		conn, err := a.udpMux.GetConn(a.localUfrag, udpAddr, c.ID())
+		if err != nil {
+			return err
 		}
 
 		if err := a.addCandidate(ctx, c, conn); err != nil {
@@ -531,13 +530,6 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 						return
 					}
 
-					conn, err := a.udpMuxSrflx.GetConnForURL(a.localUfrag, url.String(), localAddr)
-					if err != nil {
-						a.log.Warnf("Failed to find connection in UDPMuxSrflx %s %s: %v", network, url, err)
-
-						return
-					}
-
 					ip := xorAddr.IP
 					port := xorAddr.Port
 
@@ -551,8 +543,14 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 					}
 					c, err := NewCandidateServerReflexive(&srflxConfig)
 					if err != nil {
-						closeConnAndLog(conn, a.log, "failed to create server reflexive candidate: %s %s %d: %v", network, ip, port, err)
+						closeConnAndLog(nil, a.log, "failed to create server reflexive candidate: %s %s %d: %v", network, ip, port, err)
 
+						return
+					}
+
+					conn, err := a.udpMuxSrflx.GetConnForURL(a.localUfrag, url.String(), localAddr, c.ID())
+					if err != nil {
+						a.log.Warnf("Failed to find connection in UDPMuxSrflx %s %s: %v", network, url, err)
 						return
 					}
 

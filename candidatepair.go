@@ -125,6 +125,9 @@ func (p *CandidatePair) Write(b []byte) (int, error) {
 }
 
 func (a *Agent) sendSTUN(msg *stun.Message, local, remote Candidate) {
+	// Add the custom attribute to the message
+	msg.Add(AttrCandidatePairID, []byte(NewCandidatePairID(local, remote).String()))
+
 	_, err := local.writeTo(msg.Raw, remote)
 	if err != nil {
 		a.log.Tracef("Failed to send STUN message: %s", err)
