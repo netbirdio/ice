@@ -13,9 +13,9 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/netbirdio/ice/v4/internal/fakenet"
+	stunx "github.com/netbirdio/ice/v4/internal/stun"
 	"github.com/pion/dtls/v3"
-	"github.com/pion/ice/v4/internal/fakenet"
-	stunx "github.com/pion/ice/v4/internal/stun"
 	"github.com/pion/logging"
 	"github.com/pion/stun/v3"
 	"github.com/pion/turn/v4"

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/ice/v4/internal/fakenet"
+	"github.com/netbirdio/ice/v4/internal/fakenet"
 	"github.com/pion/logging"
 	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v3/test"
